@@ -29,6 +29,8 @@ type fakeBackend struct {
 	historyFn     func() []backend.RawMessage
 	historyLimits []int
 	after         int64
+	through       int64
+	collectionFn  func(int64, int64, int) (backend.CollectionPage, error)
 }
 
 func (f *fakeBackend) Generation() string { return f.generation }
@@ -57,12 +59,38 @@ func (f *fakeBackend) History(_ context.Context, _ int64, limit int) ([]backend.
 	}
 	return rows[:min(limit, len(rows))], nil
 }
-func (f *fakeBackend) Collect(_ context.Context, after int64, _ int) ([]backend.RawMessage, error) {
+func (f *fakeBackend) Collect(_ context.Context, after, through int64, limit int) (backend.CollectionPage, error) {
 	f.after = after
+	f.through = through
 	if f.err != nil {
-		return nil, f.err
+		return backend.CollectionPage{}, f.err
 	}
-	return f.collected, nil
+	if f.collectionFn != nil {
+		return f.collectionFn(after, through, limit)
+	}
+	if through == 0 {
+		through = after
+		for _, row := range f.collected {
+			through = max(through, row.ID)
+		}
+	}
+	page := backend.CollectionPage{ThroughRowID: through, ScannedThroughRowID: through, Complete: true}
+	for _, row := range f.collected {
+		if row.ID <= after || row.ID > through {
+			continue
+		}
+		if len(page.Rows) == limit {
+			page.Complete = false
+			page.ScannedThroughRowID = page.Rows[len(page.Rows)-1].RowID
+			break
+		}
+		chat, err := f.Chat(context.Background(), row.ChatID)
+		if err != nil {
+			return backend.CollectionPage{}, err
+		}
+		page.Rows = append(page.Rows, backend.CollectionRow{RowID: row.ID, Message: &row, Chat: &chat})
+	}
+	return page, nil
 }
 
 func boolp(value bool) *bool              { return &value }
@@ -321,7 +349,7 @@ func TestCollectCursorFilteringAndErrors(t *testing.T) {
 	if len(result.Messages) != 1 || result.Messages[0].RowID != 11 || fake.after != 10 {
 		t.Fatalf("result = %#v, after = %d", result, fake.after)
 	}
-	c, err := decodeCursor(result.Cursor)
+	c, err := server.decodeCursor(result.Cursor)
 	if err != nil || c.RowID != 13 || c.AccountID != "acct" {
 		t.Fatalf("cursor = %#v, %v", c, err)
 	}
@@ -348,9 +376,10 @@ func TestCollectPaginatesWithoutSkippingVisibleRows(t *testing.T) {
 	fake := &fakeBackend{generation: "gen", chats: []backend.RawChat{chat}, collected: []backend.RawMessage{
 		message(11, chat, "+14155550100", "one"), message(12, chat, "+14155550100", "two"),
 	}}
-	resp := testServer(t, fake, policyPath).dispatch(context.Background(), request(t, rpc.MethodCollect, rpc.CollectParams{AfterRowID: 10, DatabaseGeneration: "gen", Limit: 1}))
+	server := testServer(t, fake, policyPath)
+	resp := server.dispatch(context.Background(), request(t, rpc.MethodCollect, rpc.CollectParams{AfterRowID: 10, DatabaseGeneration: "gen", Limit: 1}))
 	result := resp.Result.(rpc.CollectResult)
-	c, _ := decodeCursor(result.Cursor)
+	c, _ := server.decodeCursor(result.Cursor)
 	if !result.More || len(result.Messages) != 1 || c.RowID != 11 {
 		t.Fatalf("result = %#v cursor=%#v", result, c)
 	}

@@ -24,6 +24,8 @@ Success and error envelopes:
 
 `system.info {}` returns the instance, public account ID, effective database
 generation, maximum result count, protocol version, and this exact method list.
+With the patched backend it includes `collection_protocol: "bounded_rows_v1"`.
+Collectors must require this capability before interpreting range completion.
 
 When the optional Contacts source is configured, it also returns
 `contacts_policy` with `state` (`ready`, `degraded`, or `unavailable`) and optional
@@ -64,13 +66,29 @@ or:
 {"cursor":"PREVIOUS_CURSOR","limit":50}
 ```
 
-It returns ascending messages, a replacement cursor, and `more`. A true value
-requests an immediate follow-up probe. No observable rows in the watch window
-produces retryable `collection_incomplete`, with no cursor advancement. Keep the
-previous cursor and retry later. This may also indicate upstream-suppressed
-batches; v1 cannot guarantee a full replay through such a batch. Never combine
-the two cursor forms. Cursors are account- and database-generation-bound, but
-are not authentication tokens; Unix peer credentials provide authentication.
+It returns ascending messages, an opaque replacement cursor, `more`, and
+`range_complete`. Exactly one of the latter two flags is true. The first page
+captures an inclusive upper row boundary; a pending cursor preserves that
+boundary across retries, pages and broker restarts. `more: true` requests another
+page. `range_complete: true` means every existing insertion row in that bounded
+range has been examined under the applicable visibility rules; using the
+completed cursor again begins the next range. It does not assert cloud-sync
+freshness, coverage before the chosen seed, or capture of later edits/deletions.
+
+The backend scans at most `min(limit, max_collection_scan)` physical rows, so
+filtered messages can leave a short or empty page. Those rows still advance the
+cursor. A quiet database returns a successful empty completed page, not an error.
+The page size bounds work, not the total backlog; there is no watch-window
+overflow. `after_row_id: 0` explicitly starts before the first row; generation
+is still required. Never combine the two cursor forms or derive a collection
+boundary implicitly from newest-first history.
+
+Persist messages and cursor atomically. Failed pages never supply a replacement
+cursor. New cursors encrypt/authenticate row boundaries using the persistent
+owner-only key next to the policy file. They are bound to instance, account and
+database generation. Existing v1 cursors resume from their same exclusive row
+and upgrade to the new format. Unix peer credentials remain authentication;
+neither cursors nor range flags grant visibility.
 
 ## Message fields
 
@@ -88,6 +106,7 @@ Stable error codes include `invalid_request`, `invalid_params`,
 `unsupported_version`, `unauthorized_peer`, `peer_auth_failed`,
 `method_not_allowed`, `policy_unavailable`, `not_visible`, `not_found`,
 `lookup_incomplete`, `stale_generation`, `stale_cursor`,
+`collection_unsupported`,
 `collection_overflow`, `collection_incomplete`, `backend_invalid`,
 `backend_unavailable`, `backend_timeout`, and `response_too_large`.
 

@@ -51,6 +51,7 @@ type SystemInfo struct {
 	MaxResults         int                 `json:"max_results"`
 	Methods            []string            `json:"methods"`
 	ContactsPolicy     *ContactsPolicyInfo `json:"contacts_policy,omitempty"`
+	CollectionProtocol string              `json:"collection_protocol,omitempty"`
 }
 
 // Health only: never disclose selected lists, contact identities or their counts.
@@ -123,7 +124,8 @@ type GetMessageResult struct {
 }
 
 type CollectResult struct {
-	Messages []Message `json:"messages"`
-	Cursor   string    `json:"cursor"`
-	More     bool      `json:"more"`
+	Messages      []Message `json:"messages"`
+	Cursor        string    `json:"cursor"`
+	More          bool      `json:"more"`
+	RangeComplete bool      `json:"range_complete"`
 }

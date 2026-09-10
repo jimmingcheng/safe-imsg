@@ -14,6 +14,7 @@ import (
 )
 
 const (
+	CollectionBackendVersion = "0.13.1-safe-imsg.1"
 	defaultSocketMode        = "0660"
 	defaultMaxResults        = 100
 	defaultMaxChatScan       = 500
@@ -106,8 +107,8 @@ func (c Config) Validate() error {
 			return fmt.Errorf("config: %s is too long", field)
 		}
 	}
-	if c.BackendVersion != "0.13.1" {
-		return fmt.Errorf("config: backend_version must be the audited version 0.13.1")
+	if c.BackendVersion != "0.13.1" && c.BackendVersion != CollectionBackendVersion {
+		return fmt.Errorf("config: backend_version must be an audited imsg release")
 	}
 	for field, value := range map[string]string{
 		"socket_path": c.SocketPath, "backend_path": c.BackendPath,
@@ -139,8 +140,8 @@ func (c Config) Validate() error {
 	if c.MaxMessageScan < c.MaxResults || c.MaxMessageScan > 10000 {
 		return fmt.Errorf("config: max_message_scan must be between max_results and 10000")
 	}
-	if c.MaxCollectionScan < c.MaxResults || c.MaxCollectionScan > 5000 {
-		return fmt.Errorf("config: max_collection_scan must be between max_results and 5000")
+	if c.MaxCollectionScan < c.MaxResults || c.MaxCollectionScan > 1000 {
+		return fmt.Errorf("config: max_collection_scan must be between max_results and 1000")
 	}
 	if c.BackendTimeoutMillis < 1000 || c.BackendTimeoutMillis > 60000 {
 		return fmt.Errorf("config: backend_timeout_ms must be between 1000 and 60000")

@@ -22,39 +22,40 @@ func makeProcess(t *testing.T, script string) (*Process, string) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "imsg-fake")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '0.13.1\\n'; exit 0; fi\n"+script), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '0.13.1-safe-imsg.1\\n'; exit 0; fi\n"+script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	database := filepath.Join(dir, "chat.db")
 	if err := os.WriteFile(database, []byte("synthetic"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	p, err := New(config.Config{BackendPath: path, BackendVersion: "0.13.1", DatabasePath: database, AccountID: "acct", BackendAccountID: "imsg-account", DatabaseGeneration: "g", BackendTimeoutMillis: 3000})
+	p, err := New(config.Config{BackendPath: path, BackendVersion: config.CollectionBackendVersion, DatabasePath: database, AccountID: "acct", BackendAccountID: "imsg-account", DatabaseGeneration: "g", BackendTimeoutMillis: 3000})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return p, database
 }
 
-func TestWatchFailureAndNoProgress(t *testing.T) {
+func TestCollectionRequiresCheckpointAndSuccessfulExit(t *testing.T) {
 	for _, tc := range []struct {
 		name, script string
 		want         error
 	}{
-		{"clean exit", `printf '%s\n' '{"id":11}'; exit 0`, ErrFailed},
-		{"failure after row", `printf '%s\n' '{"id":11}'; exit 1`, ErrFailed},
-		{"quiet watch", `exec sleep 30`, ErrIncomplete},
+		{"missing checkpoint", `printf '%s\n' '{"kind":"row","row_id":11}'; exit 0`, ErrFailed},
+		{"failure after checkpoint", `printf '%s\n' '{"kind":"checkpoint","schema":"safe-imsg.collect.v1","through_row_id":10,"scanned_through_row_id":10,"complete":true}'; exit 1`, ErrFailed},
+		{"hung process", `exec sleep 30`, context.DeadlineExceeded},
 		{"oversized line", `head -c 2097153 /dev/zero | tr '\000' x; exec sleep 30`, ErrFailed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, _ := makeProcess(t, tc.script)
+			p.timeout = 100 * time.Millisecond
 			start := time.Now()
-			rows, err := p.Collect(context.Background(), 10, 10)
-			if !errors.Is(err, tc.want) || rows != nil {
-				t.Fatalf("rows=%v error=%v, want %v", rows, err, tc.want)
+			page, err := p.Collect(context.Background(), 10, 0, 10)
+			if !errors.Is(err, tc.want) || page.Rows != nil {
+				t.Fatalf("page=%v error=%v, want %v", page, err, tc.want)
 			}
 			if time.Since(start) > 2*time.Second {
-				t.Fatal("watch failure did not terminate promptly")
+				t.Fatal("collection failure did not terminate promptly")
 			}
 		})
 	}
@@ -97,7 +98,7 @@ func TestBackendTimeoutPreservesCause(t *testing.T) {
 			if operation == "history" {
 				_, err = p.History(context.Background(), 1, 1)
 			} else {
-				_, err = p.Collect(context.Background(), 1, 1)
+				_, err = p.Collect(context.Background(), 1, 0, 1)
 			}
 			if !errors.Is(err, ErrFailed) || !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("timeout lost its cause: %v", err)
@@ -164,29 +165,28 @@ func TestBackendErrorsDoNotIncludeStderr(t *testing.T) {
 	}
 }
 
-func TestCollectOrderingAndOverflow(t *testing.T) {
-	logPath := filepath.Join(t.TempDir(), "watch-args")
+func TestCollectArgumentConstructionAndCheckpoint(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "collect-args")
 	t.Setenv("ARGS_LOG", logPath)
 	p, _ := makeProcess(t, `
 printf '%s\n' "$@" > "$ARGS_LOG"
-if [ "$1" = watch ]; then
-  printf '%s\n' '{"id":11,"chat_id":7,"guid":"m11"}'
-  printf '%s\n' '{"id":12,"chat_id":7,"guid":"m12"}'
-  exec sleep 10
+if [ "$1" = collect ]; then
+  printf '%s\n' '{"kind":"row","row_id":11}'
+  printf '%s\n' '{"kind":"row","row_id":12}'
+  printf '%s\n' '{"kind":"checkpoint","schema":"safe-imsg.collect.v1","through_row_id":20,"scanned_through_row_id":12,"complete":false}'
 fi
 `)
-	p.timeout = 3 * time.Second
-	rows, err := p.Collect(context.Background(), 10, 2)
-	if err != nil || len(rows) != 2 || rows[0].ID != 11 || rows[1].ID != 12 {
-		t.Fatalf("Collect: %#v, %v", rows, err)
+	page, err := p.Collect(context.Background(), 10, 20, 2)
+	if err != nil || len(page.Rows) != 2 || page.Rows[0].RowID != 11 || page.ScannedThroughRowID != 12 || page.Complete {
+		t.Fatalf("Collect: %#v, %v", page, err)
 	}
 	args, _ := os.ReadFile(logPath)
-	want := []string{"watch", "--db", p.database, "--since-rowid", "10", "--debounce", "0ms", "--json"}
+	want := []string{"collect", "--db", p.database, "--since-rowid", "10", "--limit", "2", "--account-id", "imsg-account", "--json", "--through-rowid", "20"}
 	if got := strings.Fields(string(args)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %#v, want %#v", got, want)
 	}
-	if _, err := p.Collect(context.Background(), 10, 1); !errors.Is(err, ErrOverflow) {
-		t.Fatalf("overflow error = %v", err)
+	if _, err := p.Collect(context.Background(), 10, 20, 1); !errors.Is(err, ErrFailed) {
+		t.Fatalf("excessive backend page error = %v", err)
 	}
 }
 

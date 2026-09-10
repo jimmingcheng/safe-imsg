@@ -1,7 +1,9 @@
 # Audited imsg backend contract
 
-The v1 adapter is based on OpenClaw `imsg` tag `v0.13.1`, commit
-`6918867c6439298103df592d09835fdfda51a090`.
+The adapter is based on OpenClaw `imsg` tag `v0.13.1`, commit
+`6918867c6439298103df592d09835fdfda51a090`. Collection requires the reviewed
+[native overlay](../backend/imsg/README.md), version `0.13.1-safe-imsg.1`.
+The original version remains supported for other reads, not collection.
 
 It executes exactly these process shapes, with the executable and database
 paths supplied only by owner configuration:
@@ -10,7 +12,7 @@ paths supplied only by owner configuration:
 imsg chats   --db DATABASE --limit N --json
 imsg group   --db DATABASE --chat-id ID --json
 imsg history --db DATABASE --chat-id ID --limit N --json
-imsg watch   --db DATABASE --since-rowid ROW --debounce 0ms --json
+imsg collect --db DATABASE --since-rowid ROW --limit N --account-id ACCOUNT --json [--through-rowid UPPER]
 ```
 
 It never starts `imsg rpc` and never invokes send, react, read, typing, account,
@@ -26,11 +28,6 @@ The adapter relies on these audited facts:
 - history is newest-first and bounded;
 - history's `--participants` filters message senders, not chat membership, so
   the broker never uses it for authorization;
-- watch `--since-rowid` is exclusive; the value zero means “start at newest,”
-  so safe-imsg requires a positive value;
-- watch reads physical rows in ascending row-ID order in batches of 100;
-- its fallback poll interval is five seconds and it publishes no high-water
-  mark for a batch that produces no messages;
 - upstream message JSON may expand reply bodies and may contain attachments,
   reactions, previews, polls, display names, and routing data.
 
@@ -39,12 +36,31 @@ types cannot contain reply expansion, attachments or paths/names, reactions,
 previews, polls, arbitrary rich payloads, display/contact names, unread counts,
 or backend errors.
 
-The broker collects a bounded observed prefix: it waits 1.5 seconds for an
-initial row, then ends the window after 500 ms without another row. It drains
-buffered output and waits for the process before returning. Only a deliberate
-broker stop is successful; an unexpected clean exit also fails. If no rows were
-observed it returns `collection_incomplete`. Thus the overflow bound applies to
-observed rows, not to an unknowable total database backlog. Consumers must not
-interpret any watch window as proof of a complete database replay.
+## Bounded collection extension
+
+There is no watch fallback. The exclusive starting row is nonnegative; zero
+explicitly includes the first retained row. The first page captures a fixed
+inclusive upper row ID. Every page selects ascending physical rows before
+filtering, in a read-only transaction covering metadata and the completion
+probe. No snapshot is held between requests.
+
+Every scanned row emits a JSONL envelope, even when skipped as a reaction,
+non-text app event, orphan or foreign-account row. Ambiguous chat links and
+invalid required metadata fail closed. Ordinary rows decode only their own
+bounded text/attributed body and narrow chat metadata, without reply,
+attachment, contact, poll, transcription or preview enrichment.
+
+The final `safe-imsg.collect.v1` checkpoint supplies `through_row_id`,
+`scanned_through_row_id` and `complete`. Go requires this footer, successful
+process exit, strict row ordering, unchanged bounds and consistent metadata.
+Malformed/missing/oversized output, excess rows, timeout or cancellation returns
+no page. Silence never proves completion. Filtered-only pages advance; empty
+or exactly full terminal pages can prove range completion.
+
+Policy reloads before serialization. Both positions are encrypted in durable
+owner-keyed cursors. Physical scans do not exceed the requested result limit,
+so no admitted row is skipped to fit a response. Large backlogs are paginated.
+Completion covers retained insertion rows, not edits, rows deleted before
+reading, cloud synchronization or history newly granted by later policy changes.
 
 Re-audit these assumptions before changing the pinned backend version.

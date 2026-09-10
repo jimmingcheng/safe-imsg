@@ -23,8 +23,9 @@ make darwin-build
 ```
 
 The implementation was audited against OpenClaw `imsg` v0.13.1, commit
-`6918867c6439298103df592d09835fdfda51a090`. Pin that version until a newer
-backend has been reviewed against [the backend contract](docs/backend-contract.md).
+`6918867c6439298103df592d09835fdfda51a090`. Collection requires the pinned
+[native overlay](backend/imsg/README.md), version `0.13.1-safe-imsg.1`;
+the original supports other reads only. See [the backend contract](docs/backend-contract.md).
 
 ## Trust boundary
 
@@ -54,7 +55,8 @@ root-owned sticky directories such as `/tmp` are allowed as ancestors. Config
 and policy reads are bounded to 1 MiB and validate the opened file descriptor.
 File symlinks are rejected, so configure the resolved path to a pinned `imsg`
 executable rather than a Homebrew convenience symlink. Startup also executes
-`--version` and requires the configured, audited `0.13.1` version exactly.
+`--version` and requires the configured, audited version exactly. Startup creates
+a persistent private cursor key beside the policy; include it in private backups.
 
 The policy exposes:
 
@@ -109,8 +111,9 @@ safe-imsg --socket /Users/Shared/safe-imsg/personal.sock message \
   --chat-id 42 --database-generation dbgen_FROM_INFO --guid MESSAGE-GUID
 ```
 
-Incremental collection must start after a known positive row ID. A row ID from
-an admitted history response is suitable:
+Collection starts after an explicitly agreed nonnegative row ID. An admitted
+history row is suitable for a limited scope; zero requests all retained rows
+and must be an intentional backfill:
 
 ```sh
 safe-imsg --socket /Users/Shared/safe-imsg/personal.sock collect \
@@ -120,12 +123,14 @@ safe-imsg --socket /Users/Shared/safe-imsg/personal.sock collect \
   --cursor CURSOR_FROM_PREVIOUS_RESPONSE --limit 50
 ```
 
-Persist the returned cursor only after processing the response. `more: true`
-means call again immediately. When watch produces no observable rows, the broker
-returns retryable `collection_incomplete`; keep the previous cursor and retry
-later. An empty admitted message list can still advance the cursor past locally
-denied rows. A stale account/database cursor and an observed scan that exceeds
-the configured bound are explicit errors.
+Persist the cursor atomically with processing the response, including empty
+pages. `more: true` continues the same fixed range; resume next run if your work
+budget is exhausted. `range_complete: true` means that bounded local insertion
+range is exhausted. Reusing its cursor starts the next range. Empty pages can
+advance past filtered rows or finish a quiet range. Require
+`info.collection_protocol == "bounded_rows_v1"` before collecting. Errors leave
+the last committed cursor unchanged. Opaque cursors survive restarts and bind
+the account, database generation and broker instance.
 
 ## Deliberate v1 limitations
 
@@ -137,16 +142,11 @@ the configured bound are explicit errors.
   reads only the requested number of recent backend messages in one call,
   and sets `scan_complete: false` whenever that page is full. Local suppression
   can underfill the result; it does not cause additional history scans.
-- There is no safe “start at current maximum row” backend primitive. Collection
-  therefore requires a known positive starting row and never derives one by
-  taking the maximum of newest-first history.
-- `imsg watch` does not expose its internal maximum scanned row. The broker
-  advances only across rows it actually observes. Upstream reads at most 100
-  physical rows per poll and can suppress an entire batch. Repeated collection
-  may then make no progress: v1 cannot promise a full database replay or total
-  backlog detection. `collection_incomplete` reports this uncertainty instead of
-  claiming that the stream is caught up. Watch process exits and malformed
-  output return errors, without advancing the cursor.
+- Initialization never silently selects a starting scope or derives a global
+  checkpoint from newest-first history; it remains an owner decision.
+- Collection covers retained insertion rows, not edits, deleted rows, cloud
+  synchronization or historical messages newly admitted by later policy changes.
+  Range completion does not establish complete historical coverage.
 - This repository does not deploy or modify OpenClaw, Donna's unified intake,
   SSH access, or Messages. The JSON client is suitable for a later native
   Codex app-server/OpenClaw ingestion wrapper, where admitted items must remain

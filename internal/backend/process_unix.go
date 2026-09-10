@@ -19,12 +19,3 @@ func configureProcess(cmd *exec.Cmd) {
 		return err
 	}
 }
-
-func killedProcess(err error) bool {
-	var exit *exec.ExitError
-	if !errors.As(err, &exit) {
-		return false
-	}
-	status, ok := exit.Sys().(syscall.WaitStatus)
-	return ok && status.Signaled() && status.Signal() == syscall.SIGKILL
-}

@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"crypto/cipher"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -39,10 +40,11 @@ type Dependencies struct {
 }
 
 type Server struct {
-	cfg         config.Config
-	deps        Dependencies
-	connections chan struct{}
-	contacts    *contacts.Manager
+	cfg          config.Config
+	deps         Dependencies
+	connections  chan struct{}
+	contacts     *contacts.Manager
+	cursorCipher cipher.AEAD
 }
 
 func New(cfg config.Config) (*Server, error) { return NewWithDeps(cfg, Dependencies{}) }
@@ -65,6 +67,11 @@ func NewWithDeps(cfg config.Config, deps Dependencies) (*Server, error) {
 		deps.PeerUID = peerUID
 	}
 	server := &Server{cfg: cfg, deps: deps, connections: make(chan struct{}, 32)}
+	var err error
+	server.cursorCipher, err = loadCursorCipher(cfg.PolicyPath + ".cursor-key")
+	if err != nil {
+		return nil, err
+	}
 	if cfg.Contacts != nil {
 		fetch := deps.ContactsFetch
 		if fetch == nil {
@@ -284,11 +291,16 @@ func (s *Server) dispatch(ctx context.Context, req rpc.Request) (resp rpc.Respon
 			value := rpc.ContactsPolicyInfo(s.contacts.Status())
 			contactsInfo = &value
 		}
+		collectionProtocol := ""
+		if s.cfg.BackendVersion == config.CollectionBackendVersion {
+			collectionProtocol = backend.CollectionProtocol
+		}
 		return rpc.Success(req.ID, rpc.SystemInfo{
 			Service: "safe-imsgd", ProtocolVersion: rpc.Version1, Instance: s.cfg.Instance,
 			AccountID: s.cfg.AccountID, DatabaseGeneration: s.deps.Backend.Generation(), MaxResults: s.cfg.MaxResults,
-			Methods:        []string{rpc.MethodSystemPing, rpc.MethodSystemInfo, rpc.MethodListChats, rpc.MethodHistory, rpc.MethodGetMessage, rpc.MethodCollect},
-			ContactsPolicy: contactsInfo,
+			Methods:            []string{rpc.MethodSystemPing, rpc.MethodSystemInfo, rpc.MethodListChats, rpc.MethodHistory, rpc.MethodGetMessage, rpc.MethodCollect},
+			ContactsPolicy:     contactsInfo,
+			CollectionProtocol: collectionProtocol,
 		})
 	case rpc.MethodListChats:
 		return s.listChats(ctx, req)
@@ -600,10 +612,12 @@ func (s *Server) getMessage(ctx context.Context, req rpc.Request) rpc.Response {
 }
 
 type cursor struct {
-	V          int    `json:"v"`
-	AccountID  string `json:"account_id"`
-	Generation string `json:"generation"`
-	RowID      int64  `json:"row_id"`
+	V            int    `json:"v"`
+	AccountID    string `json:"account_id"`
+	Generation   string `json:"generation"`
+	RowID        int64  `json:"row_id"`
+	ThroughRowID int64  `json:"through_row_id,omitempty"`
+	Complete     bool   `json:"complete,omitempty"`
 }
 
 func encodeCursor(c cursor) string {
@@ -622,7 +636,7 @@ func decodeCursor(value string) (cursor, error) {
 	var c cursor
 	dec := json.NewDecoder(strings.NewReader(string(payload)))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&c); err != nil || c.V != 1 || c.RowID <= 0 {
+	if err := dec.Decode(&c); err != nil || c.V != 1 || c.RowID <= 0 || c.ThroughRowID != 0 || c.Complete {
 		return cursor{}, fmt.Errorf("invalid cursor")
 	}
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
@@ -645,13 +659,13 @@ func (s *Server) collect(ctx context.Context, req rpc.Request) rpc.Response {
 		if params.AfterRowID != 0 || params.DatabaseGeneration != "" {
 			return invalidParams(req.ID, fmt.Errorf("cursor cannot be combined with after_row_id or database_generation"))
 		}
-		c, err = decodeCursor(params.Cursor)
+		c, err = s.decodeCursor(params.Cursor)
 		if err != nil {
 			return invalidParams(req.ID, err)
 		}
 	} else {
-		if params.AfterRowID <= 0 || params.DatabaseGeneration == "" {
-			return invalidParams(req.ID, fmt.Errorf("cursor or positive after_row_id plus database_generation is required"))
+		if params.AfterRowID < 0 || params.DatabaseGeneration == "" {
+			return invalidParams(req.ID, fmt.Errorf("cursor or nonnegative after_row_id plus database_generation is required"))
 		}
 		c = cursor{V: 1, AccountID: s.cfg.AccountID, Generation: params.DatabaseGeneration, RowID: params.AfterRowID}
 	}
@@ -661,28 +675,19 @@ func (s *Server) collect(ctx context.Context, req rpc.Request) rpc.Response {
 	if _, failure := s.loadPolicy(req.ID); failure != nil {
 		return *failure
 	}
-	rows, err := s.deps.Backend.Collect(ctx, c.RowID, s.cfg.MaxCollectionScan)
+	through := c.ThroughRowID
+	if c.Complete {
+		through = 0
+	}
+	// Bound physical work by the request too. Filtered slots remain empty; the
+	// caller follows the checkpoint, not a guess based on visible message count.
+	scanLimit := min(limit, s.cfg.MaxCollectionScan)
+	page, err := s.deps.Backend.Collect(ctx, c.RowID, through, scanLimit)
 	if err != nil {
 		return backendFailure(req.ID, err)
 	}
-	chatCache := map[int64]backend.RawChat{}
-	previousRowID := c.RowID
-	for _, row := range rows {
-		if row.ID <= previousRowID {
-			return rpc.Failure(req.ID, "backend_invalid", "backend returned non-monotonic incremental rows", false)
-		}
-		previousRowID = row.ID
-		chat, ok := chatCache[row.ChatID]
-		if !ok {
-			chat, err = s.deps.Backend.Chat(ctx, row.ChatID)
-			if err != nil {
-				return backendFailure(req.ID, err)
-			}
-			if !validChat(chat) || chat.ID != row.ChatID {
-				return rpc.Failure(req.ID, "backend_invalid", "backend returned invalid conversation metadata", false)
-			}
-			chatCache[row.ChatID] = chat
-		}
+	if backend.ValidateCollectionPage(page, c.RowID, through, scanLimit) != nil {
+		return rpc.Failure(req.ID, "backend_invalid", "backend returned an invalid collection checkpoint", false)
 	}
 	// Load policy after every backend read so a concurrent revocation applies to
 	// this response and no authorization cache survives between requests.
@@ -691,38 +696,34 @@ func (s *Server) collect(ctx context.Context, req rpc.Request) rpc.Response {
 		return *failure
 	}
 	messages := make([]rpc.Message, 0, limit)
-	lastScanned := c.RowID
-	// Any observed batch gets one conservative follow-up probe. Upstream watch
-	// exposes rows but not a definitive "caught up" marker.
-	more := len(rows) > 0
-	for _, row := range rows {
-		chat := chatCache[row.ChatID]
-		message, include, exposeErr := s.exposeMessage(row, chat, p)
+	for _, row := range page.Rows {
+		if row.Message == nil {
+			continue
+		}
+		if !validChat(*row.Chat) {
+			return rpc.Failure(req.ID, "backend_invalid", "backend returned invalid conversation metadata", false)
+		}
+		message, include, exposeErr := s.exposeMessage(*row.Message, *row.Chat, p)
 		if exposeErr != nil {
 			return rpc.Failure(req.ID, "backend_invalid", "backend returned unsafe message metadata", false)
 		}
-		if include && len(messages) == limit {
-			more = true
-			break
-		}
-		lastScanned = row.ID
 		if include {
 			messages = append(messages, message)
 		}
 	}
-	c.RowID = lastScanned
-	return rpc.Success(req.ID, rpc.CollectResult{Messages: messages, Cursor: encodeCursor(c), More: more})
+	c.RowID, c.ThroughRowID, c.Complete = page.ScannedThroughRowID, page.ThroughRowID, page.Complete
+	return rpc.Success(req.ID, rpc.CollectResult{Messages: messages, Cursor: s.encodeCursor(c), More: !page.Complete, RangeComplete: page.Complete})
 }
 
 func backendFailure(id string, err error) rpc.Response {
+	if errors.Is(err, backend.ErrUnsupported) {
+		return rpc.Failure(id, "collection_unsupported", "backend upgrade is required for bounded collection", false)
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return rpc.Failure(id, "backend_timeout", "imsg backend request exceeded its time budget", true)
 	}
-	if errors.Is(err, backend.ErrIncomplete) {
-		return rpc.Failure(id, "collection_incomplete", "watch produced no rows; retry from the unchanged cursor", true)
-	}
 	if errors.Is(err, backend.ErrOverflow) {
-		return rpc.Failure(id, "collection_overflow", "incremental backlog exceeds the configured safe scan bound", false)
+		return rpc.Failure(id, "collection_overflow", "backend output exceeded a safe response or scan bound", false)
 	}
 	return rpc.Failure(id, "backend_unavailable", "imsg backend request failed", true)
 }

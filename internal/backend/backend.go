@@ -23,9 +23,9 @@ const (
 )
 
 var (
-	ErrFailed     = errors.New("imsg backend failed")
-	ErrOverflow   = errors.New("incremental scan overflow")
-	ErrIncomplete = errors.New("incremental scan made no observable progress")
+	ErrFailed      = errors.New("imsg backend failed")
+	ErrOverflow    = errors.New("incremental scan overflow")
+	ErrUnsupported = errors.New("backend lacks bounded collection")
 )
 
 type RawChat struct {
@@ -61,15 +61,17 @@ type Service interface {
 	ListChats(context.Context, int) ([]RawChat, error)
 	Chat(context.Context, int64) (RawChat, error)
 	History(context.Context, int64, int) ([]RawMessage, error)
-	Collect(context.Context, int64, int) ([]RawMessage, error)
+	Collect(context.Context, int64, int64, int) (CollectionPage, error)
 }
 
 type Process struct {
-	path       string
-	database   string
-	generation string
-	identity   string
-	timeout    time.Duration
+	path              string
+	database          string
+	generation        string
+	identity          string
+	timeout           time.Duration
+	boundedCollection bool
+	accountID         string
 }
 
 func New(cfg config.Config) (*Process, error) {
@@ -91,6 +93,8 @@ func New(cfg config.Config) (*Process, error) {
 	return &Process{
 		path: cfg.BackendPath, database: cfg.DatabasePath, identity: identity,
 		generation: generation, timeout: time.Duration(cfg.BackendTimeoutMillis) * time.Millisecond,
+		boundedCollection: cfg.BackendVersion == config.CollectionBackendVersion,
+		accountID:         cfg.BackendAccountID,
 	}, nil
 }
 
@@ -222,79 +226,6 @@ func (p *Process) run(ctx context.Context, args []string, maxRows int, handle fu
 			}
 		case <-ctx.Done():
 			return errors.Join(ErrFailed, ctx.Err())
-		}
-	}
-}
-
-// Collect returns an observed prefix, never a claim that watch has caught up.
-// A quiet window without any row cannot distinguish an empty database from
-// slow startup or upstream-only suppressed batches, so it is explicitly incomplete.
-func (p *Process) Collect(ctx context.Context, afterRowID int64, scanLimit int) ([]RawMessage, error) {
-	if afterRowID <= 0 || scanLimit <= 0 {
-		return nil, ErrFailed
-	}
-	if err := p.checkIdentity(); err != nil {
-		return nil, err
-	}
-	ctx, cancel := context.WithTimeout(ctx, p.timeout)
-	defer cancel()
-	args := []string{"watch", "--db", p.database, "--since-rowid", strconv.FormatInt(afterRowID, 10), "--debounce", "0ms", "--json"}
-	stream, err := startStream(ctx, p.path, args)
-	if err != nil {
-		return nil, err
-	}
-	defer stream.close()
-
-	timer := time.NewTimer(1500 * time.Millisecond)
-	defer timer.Stop()
-	rows := make([]RawMessage, 0)
-	stopping := false
-	for {
-		select {
-		case event, ok := <-stream.events:
-			if !ok || ctx.Err() != nil {
-				return nil, errors.Join(ErrFailed, ctx.Err())
-			}
-			if event.line == nil {
-				if errors.Is(event.readErr, ErrOverflow) {
-					return nil, ErrOverflow
-				}
-				// Only our deliberate stop is successful. Scanner failures,
-				// ordinary nonzero exits, and unexpected clean exits fail closed.
-				if event.readErr != nil || !stopping || !killedProcess(event.exitErr) {
-					return nil, ErrFailed
-				}
-				if err := p.checkIdentity(); err != nil {
-					return nil, err
-				}
-				if len(rows) == 0 {
-					return nil, ErrIncomplete
-				}
-				return rows, nil
-			}
-			var row RawMessage
-			if err := decodeLine(event.line, &row); err != nil {
-				return nil, ErrFailed
-			}
-			rows = append(rows, row)
-			if len(rows) > scanLimit {
-				return nil, ErrOverflow
-			}
-			if !stopping {
-				timer.Reset(500 * time.Millisecond)
-			}
-		case <-timer.C:
-			if stopping {
-				return nil, ErrFailed
-			}
-			stopping = true
-			if err := stream.cmd.Cancel(); err != nil {
-				return nil, ErrFailed
-			}
-			// Drain all buffered output and observe Wait before returning.
-			timer.Reset(time.Second)
-		case <-ctx.Done():
-			return nil, errors.Join(ErrFailed, ctx.Err())
 		}
 	}
 }

@@ -53,10 +53,11 @@ client. Row IDs and ordering can reveal gaps or relative activity. Group access
 intentionally includes non-allowlisted participants once native group metadata
 is verified.
 
-Cursors in v1 are readable resume positions, including the last observed denied
-row; they are not encrypted. They can therefore reveal otherwise hidden
-activity. Hiding that metadata requires an opaque cursor format with durable
-owner-held key material. Device/inode binding detects file replacement but not
+New cursors are AES-GCM authenticated/encrypted with durable owner-only key
+material and broker-instance associated data. They hide filtered-row positions
+and the database-wide upper boundary; legacy readable v1 cursors are accepted
+as migration inputs. Admitted row IDs, timing, pagination and range completion
+still reveal some relative activity. Device/inode binding detects file replacement but not
 an in-place database restore; the owner must rotate `database_generation` for
 such a reset.
 
@@ -71,3 +72,6 @@ Local denial of service remains possible through repeated permitted requests.
 Bounds limit per-request cost but v1 has no rate limiter. The client can discard
 or forge its own cursor and thereby omit messages from its own view; cursors do
 not grant access and cannot broaden policy.
+
+Insertion cursors do not capture edits/deletions behind a checkpoint, incomplete
+cloud synchronization or new policy grants over already-scanned history.

@@ -1,6 +1,7 @@
 # safe-imsg v1
 
-Status: implementation specification; implementation and live deployment are not yet verified.
+Status: original v1 specification, with the owner-approved bounded-collection
+extension described below. Deployment verification is recorded separately.
 
 Jimming authorized starting this separate repository at `~/repos/safe-imsg/` in the current Codex conversation. The originating intake observation is `obs_74b3762e9a113cf76bd1`. This document preserves the design discussed in that conversation for the request's implementation executor. It is not a new request or a deployment authorization.
 
@@ -39,6 +40,23 @@ The audited upstream checkout is `/tmp/imsg-v0131-intake-audit`, tag `v0.13.1`, 
 - The RPC backend exposes mutating operations; the broker must not expose those methods to clients.
 
 If upstream cannot support a claimed operation correctly within bounded resources, return an explicit supported error and document the limitation; do not silently truncate, omit failures or label a stub complete. Prefer a small usable implementation over an unbounded cached mirror. Avoid a direct SQLite replacement for imsg.
+
+### Approved bounded-collection extension
+
+The owner requested replacing the watch-window limitations with reliable paged
+collection. The pinned imsg source receives a narrow `collect` command and an
+IMsgCore extension, maintained in `backend/imsg/`. The Go broker still does not
+query SQLite. See `docs/backend-contract.md` for the exact read-only contract.
+
+Each cycle fixes an inclusive upper row boundary; each page examines a bounded
+number of physical rows in a read-only transaction. Skipped/filtered rows count
+toward progress. The backend emits a final explicit checkpoint and exits; a
+watch window, silence, or result count cannot establish completion. The broker
+returns opaque restart-safe cursors and an explicit completed-range flag. A
+pending cursor retains its boundary across pages and restarts; a completed
+cursor starts the next range on its next use. Zero is an explicit all-rows seed,
+not watch's implicit "start now" behavior. Collection is an insertion-row scan,
+not a change feed for edits, deletions, later chat links, or cloud-sync freshness.
 
 ## Implementation acceptance
 

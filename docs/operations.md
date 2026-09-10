@@ -36,6 +36,11 @@ permissions; lock validation never changes an existing file's permissions.
 
 ## Validation and startup
 
+Collection requires the [native overlay](../backend/imsg/README.md), version
+`0.13.1-safe-imsg.1`. Keep the previous backend/config for rollback. After a
+binary change, verify Full Disk Access in the actual LaunchAgent context;
+successful maintenance SSH reads do not establish that permission.
+
 ```sh
 chmod 600 /Users/messages-owner/.config/safe-imsg/*.json
 safe-imsgd config validate --config /Users/messages-owner/.config/safe-imsg/broker.json
@@ -56,6 +61,13 @@ again. Invalid or unsafe policy makes data operations fail closed. After a
 database reset, stop the broker, change `database_generation`, validate, and
 restart. Never reuse an old cursor across that change.
 
+Startup creates `POLICY_PATH.cursor-key` (32 random bytes, owner-only `0600`).
+Back it up with private configuration, never in source control. Unsafe or
+malformed keys fail startup. Moving the policy requires moving its key too.
+Losing/replacing the key invalidates opaque cursors: restore it or explicitly
+agree a recovery scope, never skip to newest. Legacy v1 cursors upgrade at
+their same exclusive row position after a successful page.
+
 For automatic DM grants from the owner's local Contacts lists, follow
 [Contacts-backed policy setup](contacts-policy.md). Membership refreshes do not
 require a restart; changes to the configured container/list selection do. This
@@ -69,11 +81,16 @@ raw backend failures. Supervise process health and `system.ping`; treat a
 `collection_overflow` as an operator event. Resolve the cause rather than
 raising scan bounds without reviewing resource impact.
 
-`collection_incomplete` is retryable and leaves the cursor unchanged. It means
-watch produced no observable rows before its window ended, which can reflect a
-quiet database, slow startup, or a batch suppressed internally by upstream.
-Repeated lack of progress requires owner investigation; never advance a cursor
-manually to bypass an unresolved batch if complete collection is required.
+Require `system.info.collection_protocol == "bounded_rows_v1"`; otherwise
+collection returns `collection_unsupported`. Quiet ranges complete successfully;
+filtered-only pages can advance without observations. Follow `more` while the
+run budget allows, preserving the opaque cursor between runs. Backlogs larger
+than a page are normal. Commit messages and cursor together, including empty
+pages. Use a finite broker deadline and longer client deadline (for example 30
+and 35 seconds); do not start a call without enough run budget to finish it.
+Errors preserve the last committed cursor. Never skip an unresolved page to
+clear a warning. Completion covers only a fixed local insertion range, not cloud
+sync, edits or retrospective policy grants.
 
 No live message read, export, send, OpenClaw modification, SSH change, or Donna
 bridge change is part of repository installation or testing.
