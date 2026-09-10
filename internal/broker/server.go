@@ -19,6 +19,7 @@ import (
 
 	"github.com/jimmingcheng/safe-imsg/internal/backend"
 	"github.com/jimmingcheng/safe-imsg/internal/config"
+	"github.com/jimmingcheng/safe-imsg/internal/contacts"
 	contentfilter "github.com/jimmingcheng/safe-imsg/internal/filter"
 	"github.com/jimmingcheng/safe-imsg/internal/policy"
 	"github.com/jimmingcheng/safe-imsg/internal/rpc"
@@ -31,15 +32,17 @@ const (
 )
 
 type Dependencies struct {
-	Backend    backend.Service
-	LoadPolicy func(string) (*policy.Policy, error)
-	PeerUID    func(*net.UnixConn) (uint32, error)
+	Backend       backend.Service
+	LoadPolicy    func(string) (*policy.Policy, error)
+	PeerUID       func(*net.UnixConn) (uint32, error)
+	ContactsFetch contacts.FetchFunc
 }
 
 type Server struct {
 	cfg         config.Config
 	deps        Dependencies
 	connections chan struct{}
+	contacts    *contacts.Manager
 }
 
 func New(cfg config.Config) (*Server, error) { return NewWithDeps(cfg, Dependencies{}) }
@@ -61,12 +64,28 @@ func NewWithDeps(cfg config.Config, deps Dependencies) (*Server, error) {
 	if deps.PeerUID == nil {
 		deps.PeerUID = peerUID
 	}
-	return &Server{cfg: cfg, deps: deps, connections: make(chan struct{}, 32)}, nil
+	server := &Server{cfg: cfg, deps: deps, connections: make(chan struct{}, 32)}
+	if cfg.Contacts != nil {
+		fetch := deps.ContactsFetch
+		if fetch == nil {
+			if err := contacts.CheckHelper(cfg.Contacts.HelperPath); err != nil {
+				return nil, err
+			}
+			fetch = contacts.Fetch
+		}
+		server.contacts = contacts.NewManager(*cfg.Contacts, fetch, nil)
+	}
+	return server, nil
 }
 
 func (s *Server) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	if s.contacts != nil {
+		done := make(chan struct{})
+		go func() { defer close(done); s.contacts.Run(ctx) }()
+		defer func() { cancel(); <-done }()
+	}
 	dir := filepath.Dir(s.cfg.SocketPath)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("create socket directory: %w", err)
@@ -260,10 +279,16 @@ func (s *Server) dispatch(ctx context.Context, req rpc.Request) (resp rpc.Respon
 		if err := decodeEmpty(req.Params); err != nil {
 			return invalidParams(req.ID, err)
 		}
+		var contactsInfo *rpc.ContactsPolicyInfo
+		if s.contacts != nil {
+			value := rpc.ContactsPolicyInfo(s.contacts.Status())
+			contactsInfo = &value
+		}
 		return rpc.Success(req.ID, rpc.SystemInfo{
 			Service: "safe-imsgd", ProtocolVersion: rpc.Version1, Instance: s.cfg.Instance,
 			AccountID: s.cfg.AccountID, DatabaseGeneration: s.deps.Backend.Generation(), MaxResults: s.cfg.MaxResults,
-			Methods: []string{rpc.MethodSystemPing, rpc.MethodSystemInfo, rpc.MethodListChats, rpc.MethodHistory, rpc.MethodGetMessage, rpc.MethodCollect},
+			Methods:        []string{rpc.MethodSystemPing, rpc.MethodSystemInfo, rpc.MethodListChats, rpc.MethodHistory, rpc.MethodGetMessage, rpc.MethodCollect},
+			ContactsPolicy: contactsInfo,
 		})
 	case rpc.MethodListChats:
 		return s.listChats(ctx, req)
@@ -299,6 +324,13 @@ func normalizeLimit(requested, defaultValue, maximum int) (int, error) {
 
 func (s *Server) loadPolicy(id string) (*policy.Policy, *rpc.Response) {
 	p, err := s.deps.LoadPolicy(s.cfg.PolicyPath)
+	if err == nil && s.contacts != nil {
+		var identities []string
+		identities, err = s.contacts.Get()
+		if err == nil {
+			p, err = p.WithDirect(identities)
+		}
+	}
 	if err != nil {
 		resp := rpc.Failure(id, "policy_unavailable", "policy could not be loaded safely", false)
 		return nil, &resp
@@ -621,6 +653,9 @@ func (s *Server) collect(ctx context.Context, req rpc.Request) rpc.Response {
 	}
 	if c.AccountID != s.cfg.AccountID || c.Generation != s.deps.Backend.Generation() {
 		return rpc.Failure(req.ID, "stale_cursor", "cursor belongs to a different account or database generation", false)
+	}
+	if _, failure := s.loadPolicy(req.ID); failure != nil {
+		return *failure
 	}
 	rows, err := s.deps.Backend.Collect(ctx, c.RowID, s.cfg.MaxCollectionScan)
 	if err != nil {

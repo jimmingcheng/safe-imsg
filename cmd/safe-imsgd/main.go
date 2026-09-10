@@ -26,6 +26,9 @@ func run(args []string) int {
 		return 2
 	}
 	command := args[0]
+	if command == "contacts" {
+		return contactsCommand(args[1:])
+	}
 	if command == "config" {
 		if len(args) < 2 || args[1] != "validate" {
 			usage()
@@ -75,4 +78,6 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "usage: safe-imsgd run --config PATH")
 	fmt.Fprintln(os.Stderr, "       safe-imsgd config validate --config PATH")
 	fmt.Fprintln(os.Stderr, "       safe-imsgd version")
+	fmt.Fprintln(os.Stderr, "       safe-imsgd contacts groups --helper PATH")
+	fmt.Fprintln(os.Stderr, "       safe-imsgd contacts preview --config PATH [--show-identities]")
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/jimmingcheng/safe-imsg/internal/securefile"
@@ -22,6 +23,35 @@ type Policy struct {
 	owners   map[string]struct{}
 	direct   map[string]struct{}
 	excluded map[string]struct{}
+}
+
+// WithDirect adds derived grants without modifying the owner's policy file.
+// Explicit exclusions and owner-alias denial retain precedence.
+func (p *Policy) WithDirect(identities []string) (*Policy, error) {
+	result := &Policy{owners: p.owners, excluded: p.excluded, direct: map[string]struct{}{}}
+	for identity := range p.direct {
+		result.direct[identity] = struct{}{}
+	}
+	for _, identity := range identities {
+		normalized, err := NormalizeIdentity(identity)
+		if err != nil {
+			return nil, fmt.Errorf("invalid derived identity")
+		}
+		if _, own := p.owners[normalized]; !own {
+			result.direct[normalized] = struct{}{}
+		}
+	}
+	return result, nil
+}
+
+// DirectIdentities supports explicit owner-local preview, not broker RPC.
+func (p *Policy) DirectIdentities() []string {
+	result := make([]string, 0, len(p.direct))
+	for identity := range p.direct {
+		result = append(result, identity)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func Load(path string) (*Policy, error) {

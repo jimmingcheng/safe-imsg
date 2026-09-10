@@ -1,6 +1,9 @@
 package policy
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func boolPtr(v bool) *bool             { return &v }
 func stringsPtr(v ...string) *[]string { return &v }
@@ -49,5 +52,30 @@ func TestNormalizeRejectsDisplayName(t *testing.T) {
 	}
 	if _, err := NormalizeIdentity("*@example.com"); err == nil {
 		t.Fatal("wildcard identity was accepted")
+	}
+}
+
+func TestDerivedGrantsPreserveStaticPolicyWithoutMutatingIt(t *testing.T) {
+	base := testPolicy()
+	derived, err := base.WithDirect([]string{"NEW@example.com", "owner@example.com", "+14155550100"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"+14155550100", "friend@example.com", "new@example.com"}; !reflect.DeepEqual(derived.DirectIdentities(), want) {
+		t.Fatal("derived grants did not union, normalize and deduplicate safely")
+	}
+	if len(base.DirectIdentities()) != 2 {
+		t.Fatal("derived grants mutated the static policy")
+	}
+	// A new empty snapshot drops derived grants, not explicit manual grants.
+	empty, err := base.WithDirect(nil)
+	if err != nil || !reflect.DeepEqual(empty.DirectIdentities(), base.DirectIdentities()) {
+		t.Fatal("empty snapshot changed manual grants")
+	}
+	if result, err := base.WithDirect([]string{"new@example.com", "*@example.com"}); err == nil || result != nil {
+		t.Fatal("invalid derived input produced a partial grant")
+	}
+	if decision := derived.Authorize(Conversation{GUID: "iMessage;-;friend@example.com", Identifier: "friend@example.com", IsGroup: boolPtr(false), Participants: stringsPtr("friend@example.com")}); decision.Allowed {
+		t.Fatal("derived policy lost explicit exclusions")
 	}
 }

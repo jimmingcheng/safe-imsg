@@ -25,6 +25,15 @@ Success and error envelopes:
 `system.info {}` returns the instance, public account ID, effective database
 generation, maximum result count, protocol version, and this exact method list.
 
+When the optional Contacts source is configured, it also returns
+`contacts_policy` with `state` (`ready`, `degraded`, or `unavailable`) and optional
+RFC 3339 `last_attempt_at`, `last_success_at`, `expires_at`, and a fixed
+`last_error_code`. It contains no list names/IDs, contact counts or identities.
+`degraded` means a transient refresh error with an unexpired snapshot still in
+use. `unavailable` makes data operations return `policy_unavailable`, without
+a replacement collection cursor. This is local-store health, not proof of
+upstream iCloud/Contacts Sync freshness. No Contacts management RPCs are added.
+
 `imsg.list_chats {"limit":20}` returns:
 
 ```json

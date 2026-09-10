@@ -43,13 +43,23 @@ func Failure(id, code, message string, retryable bool) Response {
 }
 
 type SystemInfo struct {
-	Service            string   `json:"service"`
-	ProtocolVersion    int      `json:"protocol_version"`
-	Instance           string   `json:"instance"`
-	AccountID          string   `json:"account_id"`
-	DatabaseGeneration string   `json:"database_generation"`
-	MaxResults         int      `json:"max_results"`
-	Methods            []string `json:"methods"`
+	Service            string              `json:"service"`
+	ProtocolVersion    int                 `json:"protocol_version"`
+	Instance           string              `json:"instance"`
+	AccountID          string              `json:"account_id"`
+	DatabaseGeneration string              `json:"database_generation"`
+	MaxResults         int                 `json:"max_results"`
+	Methods            []string            `json:"methods"`
+	ContactsPolicy     *ContactsPolicyInfo `json:"contacts_policy,omitempty"`
+}
+
+// Health only: never disclose selected lists, contact identities or their counts.
+type ContactsPolicyInfo struct {
+	State         string `json:"state"`
+	LastAttemptAt string `json:"last_attempt_at,omitempty"`
+	LastSuccessAt string `json:"last_success_at,omitempty"`
+	ExpiresAt     string `json:"expires_at,omitempty"`
+	LastErrorCode string `json:"last_error_code,omitempty"`
 }
 
 type Chat struct {

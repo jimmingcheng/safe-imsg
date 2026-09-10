@@ -51,6 +51,11 @@ again. Invalid or unsafe policy makes data operations fail closed. After a
 database reset, stop the broker, change `database_generation`, validate, and
 restart. Never reuse an old cursor across that change.
 
+For automatic DM grants from the owner's local Contacts lists, follow
+[Contacts-backed policy setup](contacts-policy.md). Membership refreshes do not
+require a restart; changes to the configured container/list selection do. This
+optional source requires its own native app and Contacts permission.
+
 ## Monitoring and audit
 
 The daemon does not log message bodies, participants, GUIDs, backend stderr, or

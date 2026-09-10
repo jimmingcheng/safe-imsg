@@ -66,6 +66,15 @@ Phone identities normalize to E.164. Email identities are exact and
 case-folded. Display names, substrings, wildcard domains, a message sender by
 itself, and the owner's aliases never grant access.
 
+On macOS, an optional [Contacts-backed policy source](docs/contacts-policy.md)
+can keep DM grants in sync with contacts on any list in one explicitly selected
+account in the owner's local Contacts store. This is the default when
+`group_ids` is omitted; supplying list IDs narrows it. Unlisted contacts remain
+excluded. It uses a read-only native helper, owner-local preview, bounded
+refresh/expiry, and no new client RPCs. Leave the `contacts` config absent to
+retain static policy. Set up Contacts permission and review the selected lists
+before enabling this source or backfilling messages.
+
 Validate without starting a listener:
 
 ```sh

@@ -24,22 +24,23 @@ const (
 )
 
 type Config struct {
-	Instance             string `json:"instance"`
-	AccountID            string `json:"account_id"`
-	ClientUID            uint32 `json:"client_uid"`
-	SocketPath           string `json:"socket_path"`
-	SocketMode           string `json:"socket_mode,omitempty"`
-	BackendPath          string `json:"backend_path"`
-	BackendVersion       string `json:"backend_version"`
-	DatabasePath         string `json:"database_path"`
-	BackendAccountID     string `json:"backend_account_id"`
-	DatabaseGeneration   string `json:"database_generation"`
-	PolicyPath           string `json:"policy_path"`
-	MaxResults           int    `json:"max_results,omitempty"`
-	MaxChatScan          int    `json:"max_chat_scan,omitempty"`
-	MaxMessageScan       int    `json:"max_message_scan,omitempty"`
-	MaxCollectionScan    int    `json:"max_collection_scan,omitempty"`
-	BackendTimeoutMillis int    `json:"backend_timeout_ms,omitempty"`
+	Instance             string          `json:"instance"`
+	AccountID            string          `json:"account_id"`
+	ClientUID            uint32          `json:"client_uid"`
+	SocketPath           string          `json:"socket_path"`
+	SocketMode           string          `json:"socket_mode,omitempty"`
+	BackendPath          string          `json:"backend_path"`
+	BackendVersion       string          `json:"backend_version"`
+	DatabasePath         string          `json:"database_path"`
+	BackendAccountID     string          `json:"backend_account_id"`
+	DatabaseGeneration   string          `json:"database_generation"`
+	PolicyPath           string          `json:"policy_path"`
+	MaxResults           int             `json:"max_results,omitempty"`
+	MaxChatScan          int             `json:"max_chat_scan,omitempty"`
+	MaxMessageScan       int             `json:"max_message_scan,omitempty"`
+	MaxCollectionScan    int             `json:"max_collection_scan,omitempty"`
+	BackendTimeoutMillis int             `json:"backend_timeout_ms,omitempty"`
+	Contacts             *ContactsSource `json:"contacts,omitempty"`
 }
 
 func Load(path string) (Config, error) {
@@ -64,6 +65,9 @@ func Load(path string) (Config, error) {
 }
 
 func (c *Config) applyDefaults() {
+	if c.Contacts != nil {
+		c.Contacts.ApplyDefaults()
+	}
 	if c.SocketMode == "" {
 		c.SocketMode = defaultSocketMode
 	}
@@ -85,6 +89,11 @@ func (c *Config) applyDefaults() {
 }
 
 func (c Config) Validate() error {
+	if c.Contacts != nil {
+		if err := c.Contacts.Validate(); err != nil {
+			return err
+		}
+	}
 	for field, value := range map[string]string{
 		"instance": c.Instance, "account_id": c.AccountID,
 		"backend_version": c.BackendVersion, "backend_account_id": c.BackendAccountID, "database_generation": c.DatabaseGeneration,

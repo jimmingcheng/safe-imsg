@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key><string>com.safe-imsg.contacts</string>
+    <key>CFBundleName</key><string>Safe Imsg Contacts</string>
+    <key>CFBundleDisplayName</key><string>Safe Imsg Contacts</string>
+    <key>CFBundleExecutable</key><string>safe-imsg-contacts</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleVersion</key><string>2</string>
+    <key>CFBundleShortVersionString</key><string>1.1.0</string>
+    <key>LSMinimumSystemVersion</key><string>13.0</string>
+    <key>LSUIElement</key><true/>
+    <key>NSContactsUsageDescription</key>
+    <string>Read selected contact lists, phone numbers, and email addresses to maintain your private, read-only iMessage whitelist. Your contacts will not be edited.</string>
+</dict>
+</plist>

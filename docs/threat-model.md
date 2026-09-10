@@ -14,6 +14,15 @@ binaries, owner configuration and policy, and Apple's Messages database are
 trusted. The client user, its processes, its prompts, and any LLM consuming
 admitted output are untrusted.
 
+With the optional Contacts policy source, the native helper/app bundle, the
+owner's selected local Contacts cards/list membership, and the services/apps
+that sync those lists are also trusted policy inputs. Someone able to change
+a selected card's phone/email fields can change derived DM grants. The default
+includes every list, including new lists, only in the exact owner-selected
+container. Explicit list IDs can narrow this. Linked unified cards do not import
+fields from other accounts. The client cannot discover or select contact lists
+over RPC. Local-store freshness does not prove upstream cloud sync freshness.
+
 The boundary uses filesystem ownership plus kernel-reported peer UID. Policy is
 evaluated only in the trusted broker. Conversation authorization requires
 consistent native group/direct metadata and exact normalized identities.
