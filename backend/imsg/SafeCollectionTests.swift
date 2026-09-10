@@ -119,4 +119,25 @@ import Testing
     let page = try store.safeCollection(afterRowID: 0, throughRowID: nil, limit: 10, accountID: "another-account")
     #expect(page.rows.count == 1 && page.rows[0].message == nil && page.complete)
   }
+
+  @Test func timestampHorizonFindsEarliestRecentInsertionAndHandlesEmpty() throws {
+    let (store, db) = try fixture(5)
+    // Apple epoch nanoseconds: rows 2 and 4 are recent despite an older row
+    // interleaved between them. Collection begins before row 2 and scans 3 too.
+    try db.run("UPDATE message SET date = 0")
+    let cutoff = Date(timeIntervalSince1970: MessageStore.appleEpochOffset + 100)
+    try db.run("UPDATE message SET date = ? WHERE ROWID IN (2, 4)", MessageStore.appleEpoch(cutoff))
+    let page = try store.safeCollection(afterRowID: 0, throughRowID: nil, limit: 10,
+      accountID: "account", notBefore: cutoff)
+    #expect(page.rows.map(\.id) == [2, 3, 4, 5])
+    #expect(page.complete && page.scannedThroughRowID == 5)
+    let future = Date(timeIntervalSince1970: cutoff.timeIntervalSince1970 + 100)
+    let empty = try store.safeCollection(afterRowID: 0, throughRowID: nil, limit: 10,
+      accountID: "account", notBefore: future)
+    #expect(empty.rows.isEmpty && empty.complete && empty.scannedThroughRowID == 5)
+    #expect(throws: (any Error).self) {
+      try store.safeCollection(afterRowID: 1, throughRowID: nil, limit: 10,
+        accountID: "account", notBefore: cutoff)
+    }
+  }
 }

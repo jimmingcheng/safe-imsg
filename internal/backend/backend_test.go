@@ -22,7 +22,7 @@ func makeProcess(t *testing.T, script string) (*Process, string) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "imsg-fake")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '0.13.1-safe-imsg.1\\n'; exit 0; fi\n"+script), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '0.13.1-safe-imsg.2\\n'; exit 0; fi\n"+script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	database := filepath.Join(dir, "chat.db")
@@ -50,7 +50,7 @@ func TestCollectionRequiresCheckpointAndSuccessfulExit(t *testing.T) {
 			p, _ := makeProcess(t, tc.script)
 			p.timeout = 100 * time.Millisecond
 			start := time.Now()
-			page, err := p.Collect(context.Background(), 10, 0, 10)
+			page, err := p.Collect(context.Background(), 10, 0, 10, "")
 			if !errors.Is(err, tc.want) || page.Rows != nil {
 				t.Fatalf("page=%v error=%v, want %v", page, err, tc.want)
 			}
@@ -98,7 +98,7 @@ func TestBackendTimeoutPreservesCause(t *testing.T) {
 			if operation == "history" {
 				_, err = p.History(context.Background(), 1, 1)
 			} else {
-				_, err = p.Collect(context.Background(), 1, 0, 1)
+				_, err = p.Collect(context.Background(), 1, 0, 1, "")
 			}
 			if !errors.Is(err, ErrFailed) || !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("timeout lost its cause: %v", err)
@@ -176,7 +176,7 @@ if [ "$1" = collect ]; then
   printf '%s\n' '{"kind":"checkpoint","schema":"safe-imsg.collect.v1","through_row_id":20,"scanned_through_row_id":12,"complete":false}'
 fi
 `)
-	page, err := p.Collect(context.Background(), 10, 20, 2)
+	page, err := p.Collect(context.Background(), 10, 20, 2, "")
 	if err != nil || len(page.Rows) != 2 || page.Rows[0].RowID != 11 || page.ScannedThroughRowID != 12 || page.Complete {
 		t.Fatalf("Collect: %#v, %v", page, err)
 	}
@@ -185,8 +185,23 @@ fi
 	if got := strings.Fields(string(args)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %#v, want %#v", got, want)
 	}
-	if _, err := p.Collect(context.Background(), 10, 20, 1); !errors.Is(err, ErrFailed) {
+	_, err = p.Collect(context.Background(), 0, 0, 2, "2026-09-08T00:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, _ = os.ReadFile(logPath)
+	want = []string{"collect", "--db", p.database, "--since-rowid", "0", "--limit", "2", "--account-id", "imsg-account", "--json", "--not-before", "2026-09-08T00:00:00Z"}
+	if got := strings.Fields(string(args)); !reflect.DeepEqual(got, want) {
+		t.Fatalf("horizon args = %#v, want %#v", got, want)
+	}
+	if _, err := p.Collect(context.Background(), 10, 20, 1, ""); !errors.Is(err, ErrFailed) {
 		t.Fatalf("excessive backend page error = %v", err)
+	}
+	if _, err := p.Collect(context.Background(), 10, 0, 1, "2026-09-08T00:00:00Z"); !errors.Is(err, ErrFailed) {
+		t.Fatalf("horizon with nonzero row error = %v", err)
+	}
+	if _, err := p.Collect(context.Background(), 0, 0, 1, "not-a-date"); !errors.Is(err, ErrFailed) {
+		t.Fatalf("invalid horizon error = %v", err)
 	}
 }
 

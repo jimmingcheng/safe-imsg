@@ -2,7 +2,7 @@
 
 The adapter is based on OpenClaw `imsg` tag `v0.13.1`, commit
 `6918867c6439298103df592d09835fdfda51a090`. Collection requires the reviewed
-[native overlay](../backend/imsg/README.md), version `0.13.1-safe-imsg.1`.
+[native overlay](../backend/imsg/README.md), version `0.13.1-safe-imsg.2`.
 The original version remains supported for other reads, not collection.
 
 It executes exactly these process shapes, with the executable and database
@@ -12,7 +12,7 @@ paths supplied only by owner configuration:
 imsg chats   --db DATABASE --limit N --json
 imsg group   --db DATABASE --chat-id ID --json
 imsg history --db DATABASE --chat-id ID --limit N --json
-imsg collect --db DATABASE --since-rowid ROW --limit N --account-id ACCOUNT --json [--through-rowid UPPER]
+imsg collect --db DATABASE --since-rowid ROW --limit N --account-id ACCOUNT --json [--through-rowid UPPER] [--not-before RFC3339]
 ```
 
 It never starts `imsg rpc` and never invokes send, react, read, typing, account,
@@ -43,6 +43,12 @@ explicitly includes the first retained row. The first page captures a fixed
 inclusive upper row ID. Every page selects ascending physical rows before
 filtering, in a read-only transaction covering metadata and the completion
 probe. No snapshot is held between requests.
+
+On an initial zero-row request only, `--not-before` finds the earliest physical
+row whose own message timestamp meets the requested horizon, within the same
+fixed snapshot. It does not filter later interleaved rows by date: the durable
+consumer cutoff does that before journaling. If no row meets the horizon, the
+current upper boundary is returned complete without scanning old content.
 
 Every scanned row emits a JSONL envelope, even when skipped as a reaction,
 non-text app event, orphan or foreign-account row. Ambiguous chat links and

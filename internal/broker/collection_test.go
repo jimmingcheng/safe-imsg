@@ -61,6 +61,32 @@ func TestCollectionBacklogSurvivesRestartAndConcurrentArrivals(t *testing.T) {
 	}
 }
 
+func TestCollectionTimestampHorizonIsCanonicalAndFirstPageOnly(t *testing.T) {
+	policyPath := filepath.Join(t.TempDir(), "policy.json")
+	writePolicy(t, policyPath, nil, nil)
+	fake := &fakeBackend{generation: "gen"}
+	server := testServer(t, fake, policyPath)
+	result := collectPage(t, server, rpc.CollectParams{AfterRowID: 0, DatabaseGeneration: "gen",
+		NotBefore: "2026-09-08T17:00:00-07:00", Limit: 1})
+	if fake.notBefore != "2026-09-09T00:00:00Z" || !result.RangeComplete {
+		t.Fatalf("not_before=%q result=%+v", fake.notBefore, result)
+	}
+	collectPage(t, server, rpc.CollectParams{Cursor: result.Cursor, Limit: 1})
+	if fake.notBefore != "" {
+		t.Fatalf("horizon was reused after initial page: %q", fake.notBefore)
+	}
+	for _, params := range []rpc.CollectParams{
+		{AfterRowID: 1, DatabaseGeneration: "gen", NotBefore: "2026-09-09T00:00:00Z"},
+		{AfterRowID: 0, DatabaseGeneration: "gen", NotBefore: "not-a-date"},
+		{Cursor: result.Cursor, NotBefore: "2026-09-09T00:00:00Z"},
+	} {
+		resp := server.dispatch(context.Background(), request(t, rpc.MethodCollect, params))
+		if resp.OK || resp.Error.Code != "invalid_params" {
+			t.Fatalf("unsafe horizon accepted: params=%+v response=%+v", params, resp)
+		}
+	}
+}
+
 func TestCollectionFilteredOnlyPageMakesProgressAndRevocationApplies(t *testing.T) {
 	policyPath := filepath.Join(t.TempDir(), "policy.json")
 	writePolicy(t, policyPath, []string{"+14155550100"}, nil)

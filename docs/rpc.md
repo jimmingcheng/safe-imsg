@@ -24,7 +24,7 @@ Success and error envelopes:
 
 `system.info {}` returns the instance, public account ID, effective database
 generation, maximum result count, protocol version, and this exact method list.
-With the patched backend it includes `collection_protocol: "bounded_rows_v1"`.
+With the patched backend it includes `collection_protocol: "bounded_rows_v2"`.
 Collectors must require this capability before interpreting range completion.
 
 When the optional Contacts source is configured, it also returns
@@ -60,6 +60,12 @@ It does not trigger extra scans to fill filtered slots.
 {"after_row_id":9000,"database_generation":"dbgen_...","limit":50}
 ```
 
+or an explicit timestamp horizon for an initial zero-row boundary:
+
+```json
+{"after_row_id":0,"database_generation":"dbgen_...","not_before":"2026-09-08T07:00:00Z","limit":50}
+```
+
 or:
 
 ```json
@@ -82,6 +88,13 @@ The page size bounds work, not the total backlog; there is no watch-window
 overflow. `after_row_id: 0` explicitly starts before the first row; generation
 is still required. Never combine the two cursor forms or derive a collection
 boundary implicitly from newest-first history.
+
+`not_before` must be RFC3339 and is valid only on an initial request with
+`after_row_id: 0`. The backend begins at the earliest retained insertion row
+whose message timestamp meets it. Older messages can be physically interleaved
+after that row, so a consumer promising a strict historical horizon must retain
+the cutoff and suppress those older timestamps before journaling. The broker
+canonicalizes the timestamp and does not reuse it after the first page.
 
 Persist messages and cursor atomically. Failed pages never supply a replacement
 cursor. New cursors encrypt/authenticate row boundaries using the persistent

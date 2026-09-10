@@ -13,17 +13,31 @@ enum CollectCommand {
         .make(label: "through", names: [.long("through-rowid")], help: "fixed inclusive cycle boundary"),
         .make(label: "limit", names: [.long("limit")], help: "maximum physical rows, 1 to 1000"),
         .make(label: "account", names: [.long("account-id")], help: "exact native account ID from owner configuration"),
+        .make(label: "notBefore", names: [.long("not-before")], help: "ISO8601 timestamp for a first-page horizon"),
       ])),
     usageExamples: ["imsg collect --since-rowid 0 --limit 100 --account-id ACCOUNT --json"]
   ) { values, runtime in
     guard runtime.jsonOutput, let after = values.optionInt64("after"),
       let limit = values.optionInt("limit"),
       let account = values.option("account"), !account.isEmpty,
+      values.option("notBefore") == nil || values.optionInt64("after") == 0,
       values.option("through") == nil || values.optionInt64("through") != nil
     else { throw SafeCollectionError.invalidBounds }
+    var notBefore: Date?
+    if let value = values.option("notBefore") {
+      let formatter = ISO8601DateFormatter()
+      var parsed = formatter.date(from: value)
+      if parsed == nil {
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        parsed = formatter.date(from: value)
+      }
+      guard let parsed else { throw SafeCollectionError.invalidBounds }
+      notBefore = parsed
+    }
     let store = try MessageStore(path: values.option("db") ?? MessageStore.defaultPath)
     let page = try store.safeCollection(afterRowID: after,
-      throughRowID: values.optionInt64("through"), limit: limit, accountID: account)
+      throughRowID: values.optionInt64("through"), limit: limit, accountID: account,
+      notBefore: notBefore)
     for row in page.rows {
       var payload: [String: Any] = ["kind": "row", "row_id": row.id]
       if let message = row.message, let chat = row.chat {

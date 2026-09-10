@@ -3,7 +3,7 @@
 This is a small source overlay for imsg 0.13.1 at
 `6918867c6439298103df592d09835fdfda51a090`, not a fork of its entire source tree.
 `collection.patch` registers one read-only command and identifies the build as
-`0.13.1-safe-imsg.1`. New files extend its existing `IMsgCore.MessageStore`.
+`0.13.1-safe-imsg.2`. New files extend its existing `IMsgCore.MessageStore`.
 The dependency lock is checked in so builds do not float to later versions.
 SQLite.swift uses the system SQLite default on macOS; its optional CSQLite and
 SQLCipher packages appear in the resolution graph but are not collection targets.
@@ -28,3 +28,7 @@ an owner SSH test alone is insufficient. No Contacts app rebuild is needed.
 
 See [the backend contract](../../docs/backend-contract.md) for the narrow fields,
 resource bounds, checkpoint protocol and insertion-only completeness guarantee.
+The optional first-page `--not-before` horizon locates the earliest insertion
+row at or after an ISO8601 message timestamp inside the same snapshot. Consumers
+must retain and enforce that timestamp because older messages may be interleaved
+after the selected physical row.

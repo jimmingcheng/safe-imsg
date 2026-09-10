@@ -111,10 +111,11 @@ func parseCommand(args []string) (string, any, bool) {
 		after := flags.Int64("after-row-id", 0, "known row id for the first collection")
 		generation := flags.String("database-generation", "", "generation for first collection")
 		limit := flags.Int("limit", 0, "maximum messages")
+		notBefore := flags.String("not-before", "", "RFC3339 horizon for first collection")
 		if !parseFlags(flags, args[1:]) {
 			return "", nil, false
 		}
-		return rpc.MethodCollect, rpc.CollectParams{Cursor: *cursor, AfterRowID: *after, DatabaseGeneration: *generation, Limit: *limit}, true
+		return rpc.MethodCollect, rpc.CollectParams{Cursor: *cursor, AfterRowID: *after, DatabaseGeneration: *generation, Limit: *limit, NotBefore: *notBefore}, true
 	default:
 		usage()
 		return "", nil, false

@@ -107,6 +107,7 @@ type CollectParams struct {
 	AfterRowID         int64  `json:"after_row_id,omitempty"`
 	DatabaseGeneration string `json:"database_generation,omitempty"`
 	Limit              int    `json:"limit,omitempty"`
+	NotBefore          string `json:"not_before,omitempty"`
 }
 
 type ListChatsResult struct {

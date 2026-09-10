@@ -61,7 +61,7 @@ type Service interface {
 	ListChats(context.Context, int) ([]RawChat, error)
 	Chat(context.Context, int64) (RawChat, error)
 	History(context.Context, int64, int) ([]RawMessage, error)
-	Collect(context.Context, int64, int64, int) (CollectionPage, error)
+	Collect(context.Context, int64, int64, int, string) (CollectionPage, error)
 }
 
 type Process struct {

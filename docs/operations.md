@@ -37,7 +37,7 @@ permissions; lock validation never changes an existing file's permissions.
 ## Validation and startup
 
 Collection requires the [native overlay](../backend/imsg/README.md), version
-`0.13.1-safe-imsg.1`. Keep the previous backend/config for rollback. After a
+`0.13.1-safe-imsg.2`. Keep the previous backend/config for rollback. After a
 binary change, verify Full Disk Access in the actual LaunchAgent context;
 successful maintenance SSH reads do not establish that permission.
 
@@ -81,7 +81,7 @@ raw backend failures. Supervise process health and `system.ping`; treat a
 `collection_overflow` as an operator event. Resolve the cause rather than
 raising scan bounds without reviewing resource impact.
 
-Require `system.info.collection_protocol == "bounded_rows_v1"`; otherwise
+Require `system.info.collection_protocol == "bounded_rows_v2"`; otherwise
 collection returns `collection_unsupported`. Quiet ranges complete successfully;
 filtered-only pages can advance without observations. Follow `more` while the
 run budget allows, preserving the opaque cursor between runs. Backlogs larger

@@ -6,9 +6,10 @@ import (
 	"encoding/json"
 	"io"
 	"strconv"
+	"time"
 )
 
-const CollectionProtocol = "bounded_rows_v1"
+const CollectionProtocol = "bounded_rows_v2"
 
 type CollectionRow struct {
 	RowID   int64
@@ -37,16 +38,24 @@ type collectionEvent struct {
 // Collect consumes a finite backend page and requires both a validated final
 // checkpoint and a successful process exit. A watch window is never a fallback.
 // throughRowID == 0 captures a new boundary; nonzero pins a pending cycle.
-func (p *Process) Collect(ctx context.Context, afterRowID, throughRowID int64, limit int) (CollectionPage, error) {
+func (p *Process) Collect(ctx context.Context, afterRowID, throughRowID int64, limit int, notBefore string) (CollectionPage, error) {
 	if !p.boundedCollection {
 		return CollectionPage{}, ErrUnsupported
 	}
-	if afterRowID < 0 || throughRowID < 0 || (throughRowID != 0 && throughRowID < afterRowID) || limit < 1 || limit > 1000 {
+	if afterRowID < 0 || throughRowID < 0 || (throughRowID != 0 && throughRowID < afterRowID) || limit < 1 || limit > 1000 || (notBefore != "" && (afterRowID != 0 || throughRowID != 0)) {
 		return CollectionPage{}, ErrFailed
+	}
+	if notBefore != "" {
+		if _, err := time.Parse(time.RFC3339, notBefore); err != nil {
+			return CollectionPage{}, ErrFailed
+		}
 	}
 	args := []string{"collect", "--db", p.database, "--since-rowid", strconv.FormatInt(afterRowID, 10), "--limit", strconv.Itoa(limit), "--account-id", p.accountID, "--json"}
 	if throughRowID != 0 {
 		args = append(args, "--through-rowid", strconv.FormatInt(throughRowID, 10))
+	}
+	if notBefore != "" {
+		args = append(args, "--not-before", notBefore)
 	}
 	page := CollectionPage{}
 	checkpoint := false

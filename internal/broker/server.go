@@ -656,8 +656,8 @@ func (s *Server) collect(ctx context.Context, req rpc.Request) rpc.Response {
 	}
 	var c cursor
 	if params.Cursor != "" {
-		if params.AfterRowID != 0 || params.DatabaseGeneration != "" {
-			return invalidParams(req.ID, fmt.Errorf("cursor cannot be combined with after_row_id or database_generation"))
+		if params.AfterRowID != 0 || params.DatabaseGeneration != "" || params.NotBefore != "" {
+			return invalidParams(req.ID, fmt.Errorf("cursor cannot be combined with initial collection parameters"))
 		}
 		c, err = s.decodeCursor(params.Cursor)
 		if err != nil {
@@ -668,6 +668,17 @@ func (s *Server) collect(ctx context.Context, req rpc.Request) rpc.Response {
 			return invalidParams(req.ID, fmt.Errorf("cursor or nonnegative after_row_id plus database_generation is required"))
 		}
 		c = cursor{V: 1, AccountID: s.cfg.AccountID, Generation: params.DatabaseGeneration, RowID: params.AfterRowID}
+	}
+	notBefore := ""
+	if params.NotBefore != "" {
+		if params.Cursor != "" || params.AfterRowID != 0 {
+			return invalidParams(req.ID, fmt.Errorf("not_before requires an initial zero row boundary"))
+		}
+		value, parseErr := time.Parse(time.RFC3339, params.NotBefore)
+		if parseErr != nil {
+			return invalidParams(req.ID, fmt.Errorf("not_before must be RFC3339"))
+		}
+		notBefore = value.UTC().Format(time.RFC3339Nano)
 	}
 	if c.AccountID != s.cfg.AccountID || c.Generation != s.deps.Backend.Generation() {
 		return rpc.Failure(req.ID, "stale_cursor", "cursor belongs to a different account or database generation", false)
@@ -682,7 +693,7 @@ func (s *Server) collect(ctx context.Context, req rpc.Request) rpc.Response {
 	// Bound physical work by the request too. Filtered slots remain empty; the
 	// caller follows the checkpoint, not a guess based on visible message count.
 	scanLimit := min(limit, s.cfg.MaxCollectionScan)
-	page, err := s.deps.Backend.Collect(ctx, c.RowID, through, scanLimit)
+	page, err := s.deps.Backend.Collect(ctx, c.RowID, through, scanLimit, notBefore)
 	if err != nil {
 		return backendFailure(req.ID, err)
 	}

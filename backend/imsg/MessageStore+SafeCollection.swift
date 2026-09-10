@@ -30,11 +30,13 @@ public enum SafeCollectionError: Error {
 }
 
 extension MessageStore {
-  public func safeCollection(afterRowID: Int64, throughRowID: Int64?, limit: Int, accountID: String? = nil) throws
+  public func safeCollection(afterRowID: Int64, throughRowID: Int64?, limit: Int,
+    accountID: String? = nil, notBefore: Date? = nil) throws
     -> SafeCollectionPage
   {
     guard afterRowID >= 0, limit > 0, limit <= 1000,
-      throughRowID == nil || throughRowID! >= afterRowID
+      throughRowID == nil || throughRowID! >= afterRowID,
+      notBefore == nil || (afterRowID == 0 && throughRowID == nil)
     else { throw SafeCollectionError.invalidBounds }
     guard schema.hasReactionColumns else { throw SafeCollectionError.unsupportedSchema }
 
@@ -49,12 +51,26 @@ extension MessageStore {
       try db.execute("BEGIN DEFERRED TRANSACTION")
       do {
         let upper = try throughRowID ?? max(afterRowID, int64Value(db.scalar("SELECT MAX(ROWID) FROM message")) ?? 0)
+        var lower = afterRowID
+        if let notBefore {
+          // Find the earliest insertion row whose message timestamp is in the
+          // requested horizon. Rows after it are still scanned physically and
+          // older interleaved rows are left for the consumer's durable cutoff.
+          let threshold = MessageStore.appleEpoch(notBefore)
+          if let first = int64Value(try db.scalar(
+            "SELECT MIN(ROWID) FROM message WHERE ROWID <= ? AND date >= ?", upper, threshold))
+          {
+            lower = max(0, first - 1)
+          } else {
+            lower = upper
+          }
+        }
         let ids = try db.prepareRowIterator(
           "SELECT ROWID AS id FROM message WHERE ROWID > ? AND ROWID <= ? ORDER BY ROWID LIMIT ?",
-          bindings: [afterRowID, upper, limit])
+          bindings: [lower, upper, limit])
         var rawIDs: [Int64] = []
         while let row = try ids.failableNext() {
-          guard let id = try int64Value(row, "id"), id > afterRowID else {
+          guard let id = try int64Value(row, "id"), id > lower else {
             throw SafeCollectionError.unsafeMetadata
           }
           rawIDs.append(id)
@@ -64,7 +80,7 @@ extension MessageStore {
         for id in rawIDs {
           rows.append(try safeCollectionRow(id, db: db, chats: &chats, accountID: accountID))
         }
-        let last = rawIDs.last ?? afterRowID
+        let last = rawIDs.last ?? lower
         let more = int64Value(try db.scalar(
           "SELECT EXISTS(SELECT 1 FROM message WHERE ROWID > ? AND ROWID <= ? LIMIT 1)", last, upper)) == 1
         page = SafeCollectionPage(rows: rows, throughRowID: upper,

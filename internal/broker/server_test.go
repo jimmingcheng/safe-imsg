@@ -30,6 +30,7 @@ type fakeBackend struct {
 	historyLimits []int
 	after         int64
 	through       int64
+	notBefore     string
 	collectionFn  func(int64, int64, int) (backend.CollectionPage, error)
 }
 
@@ -59,9 +60,10 @@ func (f *fakeBackend) History(_ context.Context, _ int64, limit int) ([]backend.
 	}
 	return rows[:min(limit, len(rows))], nil
 }
-func (f *fakeBackend) Collect(_ context.Context, after, through int64, limit int) (backend.CollectionPage, error) {
+func (f *fakeBackend) Collect(_ context.Context, after, through int64, limit int, notBefore string) (backend.CollectionPage, error) {
 	f.after = after
 	f.through = through
+	f.notBefore = notBefore
 	if f.err != nil {
 		return backend.CollectionPage{}, f.err
 	}
