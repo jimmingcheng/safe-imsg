@@ -208,7 +208,7 @@ func (p *Process) run(ctx context.Context, args []string, maxRows int, handle fu
 		select {
 		case event, ok := <-stream.events:
 			if !ok || ctx.Err() != nil {
-				return ErrFailed
+				return errors.Join(ErrFailed, ctx.Err())
 			}
 			if event.line == nil {
 				if event.readErr != nil || event.exitErr != nil {
@@ -221,7 +221,7 @@ func (p *Process) run(ctx context.Context, args []string, maxRows int, handle fu
 				return ErrFailed
 			}
 		case <-ctx.Done():
-			return ErrFailed
+			return errors.Join(ErrFailed, ctx.Err())
 		}
 	}
 }
@@ -253,7 +253,7 @@ func (p *Process) Collect(ctx context.Context, afterRowID int64, scanLimit int) 
 		select {
 		case event, ok := <-stream.events:
 			if !ok || ctx.Err() != nil {
-				return nil, ErrFailed
+				return nil, errors.Join(ErrFailed, ctx.Err())
 			}
 			if event.line == nil {
 				if errors.Is(event.readErr, ErrOverflow) {
@@ -294,7 +294,7 @@ func (p *Process) Collect(ctx context.Context, afterRowID int64, scanLimit int) 
 			// Drain all buffered output and observe Wait before returning.
 			timer.Reset(time.Second)
 		case <-ctx.Done():
-			return nil, ErrFailed
+			return nil, errors.Join(ErrFailed, ctx.Err())
 		}
 	}
 }

@@ -44,6 +44,10 @@ upstream iCloud/Contacts Sync freshness. No Contacts management RPCs are added.
 optional. It returns newest-first admitted messages and `scan_complete` for the
 bounded scan and result limit: false means additional admitted messages may
 exist. An omitted limit is capped by the configured `max_results`.
+The backend reads at most `limit` recent messages in one invocation, not the
+larger `max_message_scan` lookup bound. Local suppression may return fewer
+messages (even none); a full backend page always yields `scan_complete: false`.
+It does not trigger extra scans to fill filtered slots.
 
 `imsg.get_message` requires `chat_id`, `database_generation`, and exact message
 `guid`. Lookup is limited to `max_message_scan` recent rows.
@@ -84,10 +88,11 @@ Stable error codes include `invalid_request`, `invalid_params`,
 `unsupported_version`, `unauthorized_peer`, `peer_auth_failed`,
 `method_not_allowed`, `policy_unavailable`, `not_visible`, `not_found`,
 `lookup_incomplete`, `stale_generation`, `stale_cursor`,
-`collection_overflow`, `collection_incomplete`, `backend_invalid`, `backend_unavailable`, and
-`response_too_large`.
+`collection_overflow`, `collection_incomplete`, `backend_invalid`,
+`backend_unavailable`, `backend_timeout`, and `response_too_large`.
 
 The configured `backend_timeout_ms` bounds the entire data request, including
-all per-chat backend lookups. Shutdown cancels requests and joins backend
-processes. The client preserves integer IDs exactly and cancels socket I/O when
-its context is canceled.
+all per-chat backend lookups. Exhausting it returns retryable `backend_timeout`,
+without partial results or a replacement collection cursor. Shutdown cancels
+requests and joins backend processes. The client preserves integer IDs exactly
+and cancels socket I/O when its context is canceled.

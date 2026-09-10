@@ -45,6 +45,11 @@ safe-imsgd run --config /Users/messages-owner/.config/safe-imsg/broker.json
 Production startup should use a `launchd` user agent running as the Messages
 owner, with an absolute `ProgramArguments` array containing `safe-imsgd`,
 `run`, `--config`, and the config path. Do not run the broker as root.
+Use `ProcessType` `Standard` for this request-serving agent: `Background`
+subjects backend children to additional CPU/I/O throttling even while a client
+is waiting. Keep a finite `backend_timeout_ms` (default 10000, maximum 60000);
+30000 can provide headroom for cold reads or bounded GUID lookups on older
+Macs. Client deadlines must exceed the broker budget plus transport overhead.
 
 After policy changes, no restart is needed: every data response loads policy
 again. Invalid or unsafe policy makes data operations fail closed. After a
@@ -60,7 +65,7 @@ optional source requires its own native app and Contacts permission.
 
 The daemon does not log message bodies, participants, GUIDs, backend stderr, or
 raw backend failures. Supervise process health and `system.ping`; treat a
-`backend_unavailable`, `backend_invalid`, database identity change, or
+`backend_unavailable`, `backend_timeout`, `backend_invalid`, database identity change, or
 `collection_overflow` as an operator event. Resolve the cause rather than
 raising scan bounds without reviewing resource impact.
 

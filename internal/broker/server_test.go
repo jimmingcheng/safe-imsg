@@ -21,13 +21,14 @@ import (
 )
 
 type fakeBackend struct {
-	generation string
-	chats      []backend.RawChat
-	history    []backend.RawMessage
-	collected  []backend.RawMessage
-	err        error
-	historyFn  func() []backend.RawMessage
-	after      int64
+	generation    string
+	chats         []backend.RawChat
+	history       []backend.RawMessage
+	collected     []backend.RawMessage
+	err           error
+	historyFn     func() []backend.RawMessage
+	historyLimits []int
+	after         int64
 }
 
 func (f *fakeBackend) Generation() string { return f.generation }
@@ -45,14 +46,16 @@ func (f *fakeBackend) Chat(_ context.Context, id int64) (backend.RawChat, error)
 	}
 	return backend.RawChat{}, backend.ErrFailed
 }
-func (f *fakeBackend) History(context.Context, int64, int) ([]backend.RawMessage, error) {
+func (f *fakeBackend) History(_ context.Context, _ int64, limit int) ([]backend.RawMessage, error) {
+	f.historyLimits = append(f.historyLimits, limit)
 	if f.err != nil {
 		return nil, f.err
 	}
+	rows := f.history
 	if f.historyFn != nil {
-		return f.historyFn(), nil
+		rows = f.historyFn()
 	}
-	return f.history, nil
+	return rows[:min(limit, len(rows))], nil
 }
 func (f *fakeBackend) Collect(_ context.Context, after int64, _ int) ([]backend.RawMessage, error) {
 	f.after = after
@@ -191,6 +194,55 @@ func TestHistorySuppressesSecretsAndPreservesNewestFirst(t *testing.T) {
 	}
 }
 
+func TestHistoryUsesOneRequestSizedScan(t *testing.T) {
+	for _, tc := range []struct {
+		name                                                 string
+		limit, available, suppressed, wantScan, wantMessages int
+		complete                                             bool
+	}{
+		{"one from large history", 1, 1000, 0, 1, 1, false},
+		{"exactly full", 2, 2, 0, 2, 2, false},
+		{"short history", 3, 2, 0, 3, 2, true},
+		{"empty history", 3, 0, 0, 3, 0, true},
+		{"filtered full page", 2, 1000, 1, 2, 1, false},
+		{"entire page suppressed", 2, 1000, 2, 2, 0, false},
+		{"filtered short history", 3, 2, 1, 3, 1, true},
+		{"default capped by max results", 0, 1000, 0, 10, 10, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policyPath := filepath.Join(t.TempDir(), "policy.json")
+			writePolicy(t, policyPath, []string{"+14155550100"}, nil)
+			chat := dm(1, "+14155550100")
+			fake := &fakeBackend{generation: "gen", chats: []backend.RawChat{chat}}
+			for i := 0; i < tc.available; i++ {
+				body := "ordinary message"
+				if i < tc.suppressed {
+					body = "Your verification code is 123456"
+				}
+				fake.history = append(fake.history, message(int64(2000-i), chat, "+14155550100", body))
+			}
+			server := testServer(t, fake, policyPath)
+			server.cfg.MaxMessageScan = 1000
+			resp := server.dispatch(context.Background(), request(t, rpc.MethodHistory, rpc.GenerationParams{ChatID: 1, DatabaseGeneration: "gen", Limit: tc.limit}))
+			if !resp.OK {
+				t.Fatalf("response=%+v", resp)
+			}
+			if len(fake.historyLimits) != 1 || fake.historyLimits[0] != tc.wantScan {
+				t.Fatalf("backend history scans=%v, want exactly [%d]", fake.historyLimits, tc.wantScan)
+			}
+			result := resp.Result.(rpc.HistoryResult)
+			if len(result.Messages) != tc.wantMessages || result.ScanComplete != tc.complete {
+				t.Fatalf("history=%+v", result)
+			}
+			for i, msg := range result.Messages {
+				if msg.RowID != int64(2000-tc.suppressed-i) {
+					t.Fatalf("message %d has unexpected row ID %d", i, msg.RowID)
+				}
+			}
+		})
+	}
+}
+
 func TestHistoryRejectsContradictoryMessageMetadata(t *testing.T) {
 	policyPath := filepath.Join(t.TempDir(), "policy.json")
 	writePolicy(t, policyPath, []string{"+14155550100"}, nil)
@@ -235,6 +287,9 @@ func TestGetMessageBoundedLookup(t *testing.T) {
 	resp := server.dispatch(context.Background(), request(t, rpc.MethodGetMessage, rpc.GetMessageParams{ChatID: 1, DatabaseGeneration: "gen", GUID: fake.history[0].GUID}))
 	if !resp.OK || resp.Result.(rpc.GetMessageResult).Message.Text != "hello" {
 		t.Fatalf("response = %#v", resp)
+	}
+	if len(fake.historyLimits) != 1 || fake.historyLimits[0] != server.cfg.MaxMessageScan {
+		t.Fatalf("exact GUID lookup must retain its independent scan bound: %v", fake.historyLimits)
 	}
 	fake.history = make([]backend.RawMessage, server.cfg.MaxMessageScan)
 	for i := range fake.history {
@@ -570,6 +625,37 @@ func TestShutdownCancelsRequest(t *testing.T) {
 		t.Fatal("shutdown did not cancel the backend")
 	}
 	<-callDone
+}
+
+func TestRequestTimeoutIsExplicit(t *testing.T) {
+	policyPath := filepath.Join(t.TempDir(), "policy.json")
+	writePolicy(t, policyPath, []string{"+14155550100"}, nil)
+	fake := &fakeBackend{generation: "gen", chats: []backend.RawChat{dm(1, "+14155550100")}}
+	server := testServer(t, fake, policyPath)
+	server.cfg.BackendTimeoutMillis = 50
+	server.deps.Backend = waitingBackend{Service: fake, started: make(chan context.Context, 1)}
+	start := time.Now()
+	resp := server.dispatch(context.Background(), request(t, rpc.MethodHistory, rpc.GenerationParams{ChatID: 1, DatabaseGeneration: "gen", Limit: 1}))
+	if resp.OK || resp.Error.Code != "backend_timeout" || !resp.Error.Retryable || resp.Result != nil {
+		t.Fatalf("timeout response=%+v", resp)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("request exceeded its bounded time budget")
+	}
+}
+
+func TestBackendTimeoutMapping(t *testing.T) {
+	for _, err := range []error{context.DeadlineExceeded, errors.Join(backend.ErrFailed, context.DeadlineExceeded)} {
+		resp := backendFailure("test", err)
+		if resp.Error.Code != "backend_timeout" || !resp.Error.Retryable || resp.Result != nil {
+			t.Fatalf("timeout response=%+v", resp)
+		}
+	}
+	for _, err := range []error{backend.ErrFailed, context.Canceled} {
+		if resp := backendFailure("test", err); resp.Error.Code != "backend_unavailable" {
+			t.Fatalf("non-timeout misclassified: %+v", resp)
+		}
+	}
 }
 
 func TestLimitsAndCompleteness(t *testing.T) {

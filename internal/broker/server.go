@@ -515,7 +515,11 @@ func (s *Server) history(ctx context.Context, req rpc.Request) rpc.Response {
 	if failure != nil {
 		return *failure
 	}
-	rows, err := s.deps.Backend.History(ctx, params.ChatID, s.cfg.MaxMessageScan)
+	// History is a single request-sized scan. imsg enriches every fetched row,
+	// including fields we discard, so scanning the lookup bound for a small
+	// page is expensive. Suppression can underfill the page; report that
+	// honestly instead of repeatedly rereading larger prefixes to fill it.
+	rows, err := s.deps.Backend.History(ctx, params.ChatID, limit)
 	if err != nil {
 		return backendFailure(req.ID, err)
 	}
@@ -529,7 +533,7 @@ func (s *Server) history(ctx context.Context, req rpc.Request) rpc.Response {
 		return rpc.Failure(req.ID, "not_visible", "conversation is not visible", false)
 	}
 	messages := make([]rpc.Message, 0, limit)
-	complete := len(rows) < s.cfg.MaxMessageScan
+	complete := len(rows) < limit
 	for _, row := range rows {
 		message, include, err := s.exposeMessage(row, chat, p)
 		if err != nil {
@@ -711,6 +715,9 @@ func (s *Server) collect(ctx context.Context, req rpc.Request) rpc.Response {
 }
 
 func backendFailure(id string, err error) rpc.Response {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return rpc.Failure(id, "backend_timeout", "imsg backend request exceeded its time budget", true)
+	}
 	if errors.Is(err, backend.ErrIncomplete) {
 		return rpc.Failure(id, "collection_incomplete", "watch produced no rows; retry from the unchanged cursor", true)
 	}

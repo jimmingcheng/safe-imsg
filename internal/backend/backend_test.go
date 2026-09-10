@@ -87,6 +87,28 @@ func TestBackendCancellationClosesInheritedPipes(t *testing.T) {
 	}
 }
 
+func TestBackendTimeoutPreservesCause(t *testing.T) {
+	for _, operation := range []string{"history", "collect"} {
+		t.Run(operation, func(t *testing.T) {
+			p, _ := makeProcess(t, `exec sleep 30`)
+			p.timeout = 50 * time.Millisecond
+			start := time.Now()
+			var err error
+			if operation == "history" {
+				_, err = p.History(context.Background(), 1, 1)
+			} else {
+				_, err = p.Collect(context.Background(), 1, 1)
+			}
+			if !errors.Is(err, ErrFailed) || !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("timeout lost its cause: %v", err)
+			}
+			if time.Since(start) > time.Second {
+				t.Fatal("timed-out backend did not terminate promptly")
+			}
+		})
+	}
+}
+
 func TestVersionBufferCannotBypassLimitThroughReadFrom(t *testing.T) {
 	output := cappedBuffer{max: 16}
 	_, err := io.Copy(&output, io.LimitReader(bytes.NewBufferString(strings.Repeat("x", 256)), 256))

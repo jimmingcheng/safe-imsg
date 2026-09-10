@@ -134,7 +134,9 @@ the configured bound are explicit errors.
   false `not_found` when that bound is exhausted.
 - `imsg chats` has no paging cursor. `scan_complete: false` says older visible
   chats may exist beyond the configured scan or requested result limit. History
-  also sets `scan_complete: false` if the result limit omits admitted messages.
+  reads only the requested number of recent backend messages in one call,
+  and sets `scan_complete: false` whenever that page is full. Local suppression
+  can underfill the result; it does not cause additional history scans.
 - There is no safe “start at current maximum row” backend primitive. Collection
   therefore requires a known positive starting row and never derives one by
   taking the maximum of newest-first history.
