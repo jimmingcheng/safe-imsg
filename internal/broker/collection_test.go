@@ -61,19 +61,42 @@ func TestCollectionBacklogSurvivesRestartAndConcurrentArrivals(t *testing.T) {
 	}
 }
 
-func TestCollectionTimestampHorizonIsCanonicalAndFirstPageOnly(t *testing.T) {
+func TestCollectionTimestampHorizonPersistsAcrossPendingSnapshotOnly(t *testing.T) {
 	policyPath := filepath.Join(t.TempDir(), "policy.json")
 	writePolicy(t, policyPath, nil, nil)
 	fake := &fakeBackend{generation: "gen"}
+	fake.collectionFn = func(after, through int64, limit int) (backend.CollectionPage, error) {
+		if after == 0 {
+			return backend.CollectionPage{Rows: []backend.CollectionRow{{RowID: 1}},
+				ThroughRowID: 2, ScannedThroughRowID: 1, Complete: false}, nil
+		}
+		if through == 2 {
+			return backend.CollectionPage{Rows: []backend.CollectionRow{{RowID: 2}},
+				ThroughRowID: 2, ScannedThroughRowID: 2, Complete: true}, nil
+		}
+		return backend.CollectionPage{ThroughRowID: after, ScannedThroughRowID: after, Complete: true}, nil
+	}
 	server := testServer(t, fake, policyPath)
 	result := collectPage(t, server, rpc.CollectParams{AfterRowID: 0, DatabaseGeneration: "gen",
 		NotBefore: "2026-09-08T17:00:00-07:00", Limit: 1})
-	if fake.notBefore != "2026-09-09T00:00:00Z" || !result.RangeComplete {
+	if fake.notBefore != "2026-09-09T00:00:00Z" || result.RangeComplete {
 		t.Fatalf("not_before=%q result=%+v", fake.notBefore, result)
+	}
+	c, err := server.decodeCursor(result.Cursor)
+	if err != nil || c.NotBefore != "2026-09-09T00:00:00Z" {
+		t.Fatalf("pending horizon was not sealed into cursor: cursor=%+v err=%v", c, err)
+	}
+	result = collectPage(t, server, rpc.CollectParams{Cursor: result.Cursor, Limit: 1})
+	if fake.notBefore != "2026-09-09T00:00:00Z" || !result.RangeComplete {
+		t.Fatalf("pending horizon was not reused: not_before=%q result=%+v", fake.notBefore, result)
+	}
+	c, err = server.decodeCursor(result.Cursor)
+	if err != nil || c.NotBefore != "" {
+		t.Fatalf("completed horizon remained in cursor: cursor=%+v err=%v", c, err)
 	}
 	collectPage(t, server, rpc.CollectParams{Cursor: result.Cursor, Limit: 1})
 	if fake.notBefore != "" {
-		t.Fatalf("horizon was reused after initial page: %q", fake.notBefore)
+		t.Fatalf("horizon was reused after completed snapshot: %q", fake.notBefore)
 	}
 	for _, params := range []rpc.CollectParams{
 		{AfterRowID: 1, DatabaseGeneration: "gen", NotBefore: "2026-09-09T00:00:00Z"},

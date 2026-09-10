@@ -11,6 +11,7 @@ import Testing
         attributedBody BLOB, guid TEXT, associated_message_guid TEXT,
         associated_message_type INTEGER, balloon_bundle_id TEXT, date INTEGER,
         is_from_me INTEGER, service TEXT);
+      CREATE INDEX message_date ON message(date);
       CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
       CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, guid TEXT,
         display_name TEXT, service_name TEXT, account_id TEXT);
@@ -123,13 +124,13 @@ import Testing
   @Test func timestampHorizonFindsEarliestRecentInsertionAndHandlesEmpty() throws {
     let (store, db) = try fixture(5)
     // Apple epoch nanoseconds: rows 2 and 4 are recent despite an older row
-    // interleaved between them. Collection begins before row 2 and scans 3 too.
+    // interleaved between them. Timestamp bootstrap reads only the recent rows.
     try db.run("UPDATE message SET date = 0")
     let cutoff = Date(timeIntervalSince1970: MessageStore.appleEpochOffset + 100)
     try db.run("UPDATE message SET date = ? WHERE ROWID IN (2, 4)", MessageStore.appleEpoch(cutoff))
     let page = try store.safeCollection(afterRowID: 0, throughRowID: nil, limit: 10,
       accountID: "account", notBefore: cutoff)
-    #expect(page.rows.map(\.id) == [2, 3, 4, 5])
+    #expect(page.rows.map(\.id) == [2, 4])
     #expect(page.complete && page.scannedThroughRowID == 5)
     let future = Date(timeIntervalSince1970: cutoff.timeIntervalSince1970 + 100)
     let empty = try store.safeCollection(afterRowID: 0, throughRowID: nil, limit: 10,
@@ -158,9 +159,29 @@ import Testing
     try db.run("DELETE FROM chat_message_join WHERE message_id = 5")
     let page = try store.safeCollection(afterRowID: 0, throughRowID: nil, limit: 10,
       accountID: "account", notBefore: cutoff)
-    #expect(page.rows.map(\.id) == [6, 7])
-    #expect(page.rows.compactMap(\.message).count == 2)
+    #expect(page.rows.map(\.id) == [6])
+    #expect(page.rows.compactMap(\.message).count == 1)
     #expect(page.complete)
+  }
+
+  @Test func timestampHorizonPaginatesSparseRowsThenSwitchesToInsertionOrder() throws {
+    let (store, db) = try fixture(7)
+    let cutoff = Date().addingTimeInterval(-60 * 60)
+    let recent = MessageStore.appleEpoch(Date().addingTimeInterval(-30 * 60))
+    try db.run("UPDATE message SET date = 0")
+    try db.run("UPDATE message SET date = ? WHERE ROWID IN (2, 4, 6)", recent)
+    let first = try store.safeCollection(afterRowID: 0, throughRowID: nil, limit: 2,
+      accountID: "account", notBefore: cutoff)
+    #expect(first.rows.map(\.id) == [2, 4])
+    #expect(!first.complete && first.scannedThroughRowID == 4 && first.throughRowID == 7)
+    let last = try store.safeCollection(afterRowID: first.scannedThroughRowID,
+      throughRowID: first.throughRowID, limit: 2, accountID: "account", notBefore: cutoff)
+    #expect(last.rows.map(\.id) == [6])
+    #expect(last.complete && last.scannedThroughRowID == 7)
+    try insert(db, 8)
+    let next = try store.safeCollection(afterRowID: last.scannedThroughRowID,
+      throughRowID: nil, limit: 2, accountID: "account")
+    #expect(next.rows.map(\.id) == [8] && next.complete)
   }
 
   @Test func timestampHorizonRequiresProvableAccountOwnership() throws {
@@ -174,6 +195,11 @@ import Testing
       hasChatAccountIDColumn: false)
     #expect(throws: (any Error).self) {
       try unsupported.safeCollection(afterRowID: 0, throughRowID: nil, limit: 10,
+        accountID: "account", notBefore: cutoff)
+    }
+    try db.run("DROP INDEX message_date")
+    #expect(throws: (any Error).self) {
+      try store.safeCollection(afterRowID: 0, throughRowID: nil, limit: 10,
         accountID: "account", notBefore: cutoff)
     }
   }

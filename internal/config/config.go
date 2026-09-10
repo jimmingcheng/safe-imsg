@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	CollectionBackendVersion = "0.13.1-safe-imsg.3"
+	CollectionBackendVersion = "0.13.1-safe-imsg.4"
 	defaultSocketMode        = "0660"
 	defaultMaxResults        = 100
 	defaultMaxChatScan       = 500

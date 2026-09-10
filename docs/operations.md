@@ -37,7 +37,7 @@ permissions; lock validation never changes an existing file's permissions.
 ## Validation and startup
 
 Collection requires the [native overlay](../backend/imsg/README.md), version
-`0.13.1-safe-imsg.3`. Keep the previous backend/config for rollback. After a
+`0.13.1-safe-imsg.4`. Keep the previous backend/config for rollback. After a
 binary change, verify Full Disk Access in the actual LaunchAgent context;
 successful maintenance SSH reads do not establish that permission.
 

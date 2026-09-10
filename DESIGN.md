@@ -48,9 +48,12 @@ collection. The pinned imsg source receives a narrow `collect` command and an
 IMsgCore extension, maintained in `backend/imsg/`. The Go broker still does not
 query SQLite. See `docs/backend-contract.md` for the exact read-only contract.
 
-Each cycle fixes an inclusive upper row boundary; each page examines a bounded
-number of physical rows in a read-only transaction. Skipped/filtered rows count
-toward progress. The backend emits a final explicit checkpoint and exits; a
+Each ordinary cycle fixes an inclusive upper row boundary; each page examines a
+bounded number of physical rows in a read-only transaction. Skipped/filtered
+rows count toward progress. A timestamp bootstrap instead uses the database's
+leading date index to page only in-scope rows from its fixed snapshot, then
+advances to that snapshot's upper insertion boundary. The backend emits a final
+explicit checkpoint and exits; a
 watch window, silence, or result count cannot establish completion. The broker
 returns opaque restart-safe cursors and an explicit completed-range flag. A
 pending cursor retains its boundary across pages and restarts; a completed

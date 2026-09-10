@@ -81,20 +81,21 @@ range has been examined under the applicable visibility rules; using the
 completed cursor again begins the next range. It does not assert cloud-sync
 freshness, coverage before the chosen seed, or capture of later edits/deletions.
 
-The backend scans at most `min(limit, max_collection_scan)` physical rows, so
+Ordinary cycles scan at most `min(limit, max_collection_scan)` physical rows, so
 filtered messages can leave a short or empty page. Those rows still advance the
-cursor. A quiet database returns a successful empty completed page, not an error.
-The page size bounds work, not the total backlog; there is no watch-window
+cursor. A quiet database returns a successful empty completed page, not an
+error. The page size bounds work, not the total backlog; there is no watch-window
 overflow. `after_row_id: 0` explicitly starts before the first row; generation
 is still required. Never combine the two cursor forms or derive a collection
 boundary implicitly from newest-first history.
 
-`not_before` must be RFC3339 and is valid only on an initial request with
-`after_row_id: 0`. The backend begins at the earliest retained insertion row
-whose message timestamp meets it. Older messages can be physically interleaved
-after that row, so a consumer promising a strict historical horizon must retain
-the cutoff and suppress those older timestamps before journaling. The broker
-canonicalizes the timestamp and does not reuse it after the first page.
+`not_before` must be RFC3339 and is valid only on an initial client request with
+`after_row_id: 0`. It selects indexed, plausible account messages in the fixed
+initial snapshot without returning older interleaved rows. The broker seals the
+canonical timestamp into each pending opaque cursor, clears it on completion,
+and then uses the snapshot's upper insertion boundary for future cycles. A
+consumer promising a strict historical horizon still retains the cutoff and
+suppresses older timestamps before journaling.
 
 Persist messages and cursor atomically. Failed pages never supply a replacement
 cursor. New cursors encrypt/authenticate row boundaries using the persistent

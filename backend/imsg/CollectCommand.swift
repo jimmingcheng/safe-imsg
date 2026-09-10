@@ -13,14 +13,15 @@ enum CollectCommand {
         .make(label: "through", names: [.long("through-rowid")], help: "fixed inclusive cycle boundary"),
         .make(label: "limit", names: [.long("limit")], help: "maximum physical rows, 1 to 1000"),
         .make(label: "account", names: [.long("account-id")], help: "exact native account ID from owner configuration"),
-        .make(label: "notBefore", names: [.long("not-before")], help: "ISO8601 timestamp for a first-page horizon"),
+        .make(label: "notBefore", names: [.long("not-before")], help: "ISO8601 timestamp for a timestamp-bootstrap page"),
       ])),
     usageExamples: ["imsg collect --since-rowid 0 --limit 100 --account-id ACCOUNT --json"]
   ) { values, runtime in
     guard runtime.jsonOutput, let after = values.optionInt64("after"),
       let limit = values.optionInt("limit"),
       let account = values.option("account"), !account.isEmpty,
-      values.option("notBefore") == nil || values.optionInt64("after") == 0,
+      values.option("notBefore") == nil || (values.optionInt64("after") == 0 && values.option("through") == nil)
+        || ((values.optionInt64("after") ?? 0) > 0 && values.optionInt64("through") != nil),
       values.option("through") == nil || values.optionInt64("through") != nil
     else { throw SafeCollectionError.invalidBounds }
     var notBefore: Date?

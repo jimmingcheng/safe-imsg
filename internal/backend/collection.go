@@ -42,7 +42,8 @@ func (p *Process) Collect(ctx context.Context, afterRowID, throughRowID int64, l
 	if !p.boundedCollection {
 		return CollectionPage{}, ErrUnsupported
 	}
-	if afterRowID < 0 || throughRowID < 0 || (throughRowID != 0 && throughRowID < afterRowID) || limit < 1 || limit > 1000 || (notBefore != "" && (afterRowID != 0 || throughRowID != 0)) {
+	if afterRowID < 0 || throughRowID < 0 || (throughRowID != 0 && throughRowID < afterRowID) || limit < 1 || limit > 1000 ||
+		(notBefore != "" && !((afterRowID == 0 && throughRowID == 0) || (afterRowID > 0 && throughRowID > 0))) {
 		return CollectionPage{}, ErrFailed
 	}
 	if notBefore != "" {

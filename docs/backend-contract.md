@@ -2,7 +2,7 @@
 
 The adapter is based on OpenClaw `imsg` tag `v0.13.1`, commit
 `6918867c6439298103df592d09835fdfda51a090`. Collection requires the reviewed
-[native overlay](../backend/imsg/README.md), version `0.13.1-safe-imsg.3`.
+[native overlay](../backend/imsg/README.md), version `0.13.1-safe-imsg.4`.
 The original version remains supported for other reads, not collection.
 
 It executes exactly these process shapes, with the executable and database
@@ -44,13 +44,17 @@ inclusive upper row ID. Every page selects ascending physical rows before
 filtering, in a read-only transaction covering metadata and the completion
 probe. No snapshot is held between requests.
 
-On an initial zero-row request only, `--not-before` finds the earliest physical
-row whose own message timestamp meets the requested horizon, within the same
-fixed snapshot. It does not filter later interleaved rows by date: the durable
-consumer cutoff does that before journaling. If no row meets the horizon, the
-current upper boundary is returned complete without scanning old content.
+On an initial zero-row request, `--not-before` enters timestamp-bootstrap mode.
+Every pending page carries the same timestamp and fixed upper row boundary. A
+required leading index on `message.date` selects only plausible ordinary rows
+for the configured iMessage account within that snapshot; reactions, app
+payloads, empty events, foreign accounts and implausible future dates cannot
+consume page slots. Completion advances directly to the fixed upper boundary.
+The next cycle resumes the ordinary physical insertion scan, which captures all
+later inserts regardless of their logical timestamps. The durable consumer also
+enforces the cutoff before journaling.
 
-Every scanned row emits a JSONL envelope, even when skipped as a reaction,
+Every ordinary physical-scan row emits a JSONL envelope, even when skipped as a reaction,
 non-text app event, orphan or foreign-account row. Ambiguous chat links and
 invalid required metadata fail closed. Ordinary rows decode only their own
 bounded text/attributed body and narrow chat metadata, without reply,

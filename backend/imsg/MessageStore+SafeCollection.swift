@@ -37,6 +37,7 @@ extension MessageStore {
     guard afterRowID >= 0, limit > 0, limit <= 1000,
       throughRowID == nil || throughRowID! >= afterRowID,
       notBefore == nil || (afterRowID == 0 && throughRowID == nil)
+        || (afterRowID > 0 && throughRowID != nil)
     else { throw SafeCollectionError.invalidBounds }
     guard schema.hasReactionColumns else { throw SafeCollectionError.unsupportedSchema }
     if notBefore != nil {
@@ -56,62 +57,81 @@ extension MessageStore {
       try db.execute("BEGIN DEFERRED TRANSACTION")
       do {
         let upper = try throughRowID ?? max(afterRowID, int64Value(db.scalar("SELECT MAX(ROWID) FROM message")) ?? 0)
-        var lower = afterRowID
+        var rawIDs: [Int64] = []
         if let notBefore {
-          // Anchor only on a row that could be collected for this account. A
-          // date-only anchor can be pulled arbitrarily far back by reactions,
-          // app payloads, other accounts, or corrupt future timestamps.
+          // A timestamp bootstrap queries its fixed snapshot by date on every
+          // page, then jumps to the snapshot boundary. Subsequent cycles use
+          // ordinary insertion order so late sync arrivals cannot be missed.
           guard let accountID else { throw SafeCollectionError.unsupportedSchema }
           let threshold = MessageStore.appleEpoch(notBefore)
           let latestPlausible = MessageStore.appleEpoch(Date().addingTimeInterval(5 * 60))
           let balloon = schema.hasBalloonBundleIDColumn ? "m.balloon_bundle_id" : "NULL"
           let body = schema.hasAttributedBody ? "m.attributedBody" : "NULL"
-          if let first = int64Value(try db.scalar(
+          guard let dateIndex = try safeCollectionDateIndex(db) else {
+            throw SafeCollectionError.unsupportedSchema
+          }
+          let ids = try db.prepareRowIterator(
             """
-            SELECT MIN(m.ROWID)
-            FROM message m
-            JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-            JOIN chat c ON c.ROWID = cmj.chat_id
-            WHERE m.ROWID <= ? AND m.date >= ? AND m.date <= ?
-              AND c.account_id = ?
-              AND COALESCE(m.associated_message_type, 0) = 0
-              AND (COALESCE(\(balloon), '') = '' OR
-                substr(\(balloon), -length('com.apple.messages.URLBalloonProvider')) =
-                  'com.apple.messages.URLBalloonProvider')
-              AND m.is_from_me IN (0, 1)
-              AND typeof(m.guid) = 'text'
-              AND length(CAST(m.guid AS BLOB)) BETWEEN 1 AND 512
-              AND COALESCE(length(CAST(m.text AS BLOB)), 0) <= 65536
-              AND COALESCE(length(\(body)), 0) <= 1048576
-              AND (SELECT COUNT(DISTINCT cmj2.chat_id) FROM chat_message_join cmj2
-                WHERE cmj2.message_id = m.ROWID) = 1
-            """, upper, threshold, latestPlausible, accountID))
-          {
-            lower = max(0, first - 1)
-          } else {
-            lower = upper
+            WITH recent(id) AS MATERIALIZED (
+              SELECT m.ROWID
+              FROM message m INDEXED BY \(dateIndex)
+              JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+              JOIN chat c ON c.ROWID = cmj.chat_id
+              WHERE m.ROWID > ? AND m.ROWID <= ? AND m.date >= ? AND m.date <= ?
+                AND c.account_id = ?
+                AND c.service_name = 'iMessage'
+                AND COALESCE(m.associated_message_type, 0) = 0
+                AND (COALESCE(\(balloon), '') = '' OR
+                  substr(\(balloon), -length('com.apple.messages.URLBalloonProvider')) =
+                    'com.apple.messages.URLBalloonProvider')
+                AND m.is_from_me IN (0, 1)
+                AND typeof(m.guid) = 'text'
+                AND length(CAST(m.guid AS BLOB)) BETWEEN 1 AND 512
+                AND COALESCE(length(CAST(m.text AS BLOB)), 0) <= 65536
+                AND COALESCE(length(\(body)), 0) <= 1048576
+                AND (COALESCE(length(CAST(m.text AS BLOB)), 0) > 0 OR
+                  COALESCE(length(\(body)), 0) > 0)
+                AND (SELECT COUNT(DISTINCT cmj2.chat_id) FROM chat_message_join cmj2
+                  WHERE cmj2.message_id = m.ROWID) = 1
+            )
+            SELECT id FROM recent ORDER BY id LIMIT ?
+            """, bindings: [afterRowID, upper, threshold, latestPlausible, accountID, limit + 1])
+          while let row = try ids.failableNext() {
+            guard let id = try int64Value(row, "id"), id > afterRowID else {
+              throw SafeCollectionError.unsafeMetadata
+            }
+            rawIDs.append(id)
           }
-        }
-        let ids = try db.prepareRowIterator(
-          "SELECT ROWID AS id FROM message WHERE ROWID > ? AND ROWID <= ? ORDER BY ROWID LIMIT ?",
-          bindings: [lower, upper, limit])
-        var rawIDs: [Int64] = []
-        while let row = try ids.failableNext() {
-          guard let id = try int64Value(row, "id"), id > lower else {
-            throw SafeCollectionError.unsafeMetadata
+          let more = rawIDs.count > limit
+          if more { rawIDs.removeLast() }
+          var rows: [SafeCollectionRow] = []
+          var chats: [Int64: (ChatInfo, [String])] = [:]
+          for id in rawIDs {
+            rows.append(try safeCollectionRow(id, db: db, chats: &chats, accountID: accountID))
           }
-          rawIDs.append(id)
+          page = SafeCollectionPage(rows: rows, throughRowID: upper,
+            scannedThroughRowID: more ? (rawIDs.last ?? afterRowID) : upper, complete: !more)
+        } else {
+          let ids = try db.prepareRowIterator(
+            "SELECT ROWID AS id FROM message WHERE ROWID > ? AND ROWID <= ? ORDER BY ROWID LIMIT ?",
+            bindings: [afterRowID, upper, limit])
+          while let row = try ids.failableNext() {
+            guard let id = try int64Value(row, "id"), id > afterRowID else {
+              throw SafeCollectionError.unsafeMetadata
+            }
+            rawIDs.append(id)
+          }
+          var rows: [SafeCollectionRow] = []
+          var chats: [Int64: (ChatInfo, [String])] = [:]
+          for id in rawIDs {
+            rows.append(try safeCollectionRow(id, db: db, chats: &chats, accountID: accountID))
+          }
+          let last = rawIDs.last ?? afterRowID
+          let more = int64Value(try db.scalar(
+            "SELECT EXISTS(SELECT 1 FROM message WHERE ROWID > ? AND ROWID <= ? LIMIT 1)", last, upper)) == 1
+          page = SafeCollectionPage(rows: rows, throughRowID: upper,
+            scannedThroughRowID: more ? last : upper, complete: !more)
         }
-        var rows: [SafeCollectionRow] = []
-        var chats: [Int64: (ChatInfo, [String])] = [:]
-        for id in rawIDs {
-          rows.append(try safeCollectionRow(id, db: db, chats: &chats, accountID: accountID))
-        }
-        let last = rawIDs.last ?? lower
-        let more = int64Value(try db.scalar(
-          "SELECT EXISTS(SELECT 1 FROM message WHERE ROWID > ? AND ROWID <= ? LIMIT 1)", last, upper)) == 1
-        page = SafeCollectionPage(rows: rows, throughRowID: upper,
-          scannedThroughRowID: more ? last : upper, complete: !more)
         try db.execute("COMMIT")
       } catch {
         try? db.execute("ROLLBACK")
@@ -120,6 +140,24 @@ extension MessageStore {
       guard let page else { throw SafeCollectionError.unsafeMetadata }
       return page
     }
+  }
+
+  private func safeCollectionDateIndex(_ db: Connection) throws -> String? {
+    let indexes = try db.prepareRowIterator("PRAGMA index_list('message')")
+    while let index = try indexes.failableNext() {
+      let name = try stringValue(index, "name")
+      guard !name.isEmpty, name.utf8.count <= 256 else { continue }
+      let quoted = "\"\(name.replacingOccurrences(of: "\"", with: "\"\""))\""
+      let columns = try db.prepareRowIterator("PRAGMA index_info(\(quoted))")
+      while let column = try columns.failableNext() {
+        if try intValue(column, "seqno") == 0,
+          try stringValue(column, "name").lowercased() == "date"
+        {
+          return quoted
+        }
+      }
+    }
+    return nil
   }
 
   private func safeCollectionRow(_ id: Int64, db: Connection,

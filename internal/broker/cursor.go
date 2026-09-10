@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/jimmingcheng/safe-imsg/internal/securefile"
 )
@@ -95,6 +96,11 @@ func (s *Server) decodeCursor(value string) (cursor, error) {
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF || c.Complete != (c.RowID == c.ThroughRowID) {
 		return cursor{}, invalid
+	}
+	if c.NotBefore != "" {
+		if _, err := time.Parse(time.RFC3339, c.NotBefore); err != nil || c.Complete || c.ThroughRowID == 0 {
+			return cursor{}, invalid
+		}
 	}
 	return c, nil
 }

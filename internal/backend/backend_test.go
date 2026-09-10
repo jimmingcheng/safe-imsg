@@ -22,7 +22,7 @@ func makeProcess(t *testing.T, script string) (*Process, string) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "imsg-fake")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '0.13.1-safe-imsg.3\\n'; exit 0; fi\n"+script), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '0.13.1-safe-imsg.4\\n'; exit 0; fi\n"+script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	database := filepath.Join(dir, "chat.db")
@@ -197,8 +197,13 @@ fi
 	if _, err := p.Collect(context.Background(), 10, 20, 1, ""); !errors.Is(err, ErrFailed) {
 		t.Fatalf("excessive backend page error = %v", err)
 	}
-	if _, err := p.Collect(context.Background(), 10, 0, 1, "2026-09-08T00:00:00Z"); !errors.Is(err, ErrFailed) {
-		t.Fatalf("horizon with nonzero row error = %v", err)
+	if _, err := p.Collect(context.Background(), 10, 20, 2, "2026-09-08T00:00:00Z"); err != nil {
+		t.Fatalf("pending horizon page error = %v", err)
+	}
+	args, _ = os.ReadFile(logPath)
+	want = []string{"collect", "--db", p.database, "--since-rowid", "10", "--limit", "2", "--account-id", "imsg-account", "--json", "--through-rowid", "20", "--not-before", "2026-09-08T00:00:00Z"}
+	if got := strings.Fields(string(args)); !reflect.DeepEqual(got, want) {
+		t.Fatalf("pending horizon args = %#v, want %#v", got, want)
 	}
 	if _, err := p.Collect(context.Background(), 0, 0, 1, "not-a-date"); !errors.Is(err, ErrFailed) {
 		t.Fatalf("invalid horizon error = %v", err)

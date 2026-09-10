@@ -24,7 +24,7 @@ make darwin-build
 
 The implementation was audited against OpenClaw `imsg` v0.13.1, commit
 `6918867c6439298103df592d09835fdfda51a090`. Collection requires the pinned
-[native overlay](backend/imsg/README.md), version `0.13.1-safe-imsg.3`;
+[native overlay](backend/imsg/README.md), version `0.13.1-safe-imsg.4`;
 the original supports other reads only. See [the backend contract](docs/backend-contract.md).
 
 ## Trust boundary
@@ -129,10 +129,11 @@ budget is exhausted. `range_complete: true` means that bounded local insertion
 range is exhausted. Reusing its cursor starts the next range. Empty pages can
 advance past filtered rows or finish a quiet range. Require
 `info.collection_protocol == "bounded_rows_v2"` before collecting. An initial
-`not_before` timestamp can select a date horizon without guessing a row from one
-chat; consumers must keep filtering older interleaved message timestamps. Errors leave
-the last committed cursor unchanged. Opaque cursors survive restarts and bind
-the account, database generation and broker instance.
+`not_before` timestamp pages only matching recent rows in a fixed snapshot, then
+advances to its upper insertion boundary. Consumers keep the same cutoff as a
+defense-in-depth filter. Errors leave the last committed cursor unchanged.
+Opaque cursors survive restarts and bind the account, database generation and
+broker instance.
 
 ## Deliberate v1 limitations
 

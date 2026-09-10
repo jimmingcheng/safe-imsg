@@ -618,6 +618,7 @@ type cursor struct {
 	RowID        int64  `json:"row_id"`
 	ThroughRowID int64  `json:"through_row_id,omitempty"`
 	Complete     bool   `json:"complete,omitempty"`
+	NotBefore    string `json:"not_before,omitempty"`
 }
 
 func encodeCursor(c cursor) string {
@@ -669,7 +670,7 @@ func (s *Server) collect(ctx context.Context, req rpc.Request) rpc.Response {
 		}
 		c = cursor{V: 1, AccountID: s.cfg.AccountID, Generation: params.DatabaseGeneration, RowID: params.AfterRowID}
 	}
-	notBefore := ""
+	notBefore := c.NotBefore
 	if params.NotBefore != "" {
 		if params.Cursor != "" || params.AfterRowID != 0 {
 			return invalidParams(req.ID, fmt.Errorf("not_before requires an initial zero row boundary"))
@@ -679,6 +680,7 @@ func (s *Server) collect(ctx context.Context, req rpc.Request) rpc.Response {
 			return invalidParams(req.ID, fmt.Errorf("not_before must be RFC3339"))
 		}
 		notBefore = value.UTC().Format(time.RFC3339Nano)
+		c.NotBefore = notBefore
 	}
 	if c.AccountID != s.cfg.AccountID || c.Generation != s.deps.Backend.Generation() {
 		return rpc.Failure(req.ID, "stale_cursor", "cursor belongs to a different account or database generation", false)
@@ -689,8 +691,9 @@ func (s *Server) collect(ctx context.Context, req rpc.Request) rpc.Response {
 	through := c.ThroughRowID
 	if c.Complete {
 		through = 0
+		notBefore = ""
 	}
-	// Bound physical work by the request too. Filtered slots remain empty; the
+	// Bound backend work by the request too. Filtered slots remain empty; the
 	// caller follows the checkpoint, not a guess based on visible message count.
 	scanLimit := min(limit, s.cfg.MaxCollectionScan)
 	page, err := s.deps.Backend.Collect(ctx, c.RowID, through, scanLimit, notBefore)
@@ -725,6 +728,9 @@ func (s *Server) collect(ctx context.Context, req rpc.Request) rpc.Response {
 		}
 	}
 	c.RowID, c.ThroughRowID, c.Complete = page.ScannedThroughRowID, page.ThroughRowID, page.Complete
+	if page.Complete {
+		c.NotBefore = ""
+	}
 	return rpc.Success(req.ID, rpc.CollectResult{Messages: messages, Cursor: s.encodeCursor(c), More: !page.Complete, RangeComplete: page.Complete})
 }
 
