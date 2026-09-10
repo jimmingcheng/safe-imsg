@@ -66,6 +66,9 @@ or exactly full terminal pages can prove range completion.
 Policy reloads before serialization. Both positions are encrypted in durable
 owner-keyed cursors. Physical scans do not exceed the requested result limit,
 so no admitted row is skipped to fit a response. Large backlogs are paginated.
+Rows whose conversation/message metadata cannot be safely authorized are
+omitted while their physical position advances; they never wedge all later
+collection. Structural page/checkpoint contradictions still fail the page.
 Completion covers retained insertion rows, not edits, rows deleted before
 reading, cloud synchronization or history newly granted by later policy changes.
 

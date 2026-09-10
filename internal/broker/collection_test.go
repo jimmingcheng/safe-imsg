@@ -128,6 +128,24 @@ func TestCollectionNativeSkippedRowsAndPolicyReload(t *testing.T) {
 	}
 }
 
+func TestCollectionUnsafeMessageIsSuppressedWithoutWedgingCursor(t *testing.T) {
+	policyPath := filepath.Join(t.TempDir(), "policy.json")
+	writePolicy(t, policyPath, []string{"+14155550100"}, nil)
+	chat := dm(1, "+14155550100")
+	bad := message(11, chat, "+14155550100", "must not escape")
+	bad.IsGroup = boolp(true)
+	fake := &fakeBackend{generation: "gen"}
+	fake.collectionFn = func(_, _ int64, _ int) (backend.CollectionPage, error) {
+		return backend.CollectionPage{Rows: []backend.CollectionRow{{RowID: 11, Chat: &chat, Message: &bad}},
+			ThroughRowID: 11, ScannedThroughRowID: 11, Complete: true}, nil
+	}
+	result := collectPage(t, testServer(t, fake, policyPath), rpc.CollectParams{
+		AfterRowID: 0, DatabaseGeneration: "gen", Limit: 1})
+	if len(result.Messages) != 0 || !result.RangeComplete || result.More {
+		t.Fatalf("unsafe row wedged or escaped: %+v", result)
+	}
+}
+
 func TestCursorOpaqueAuthenticatedAndLegacyUpgrade(t *testing.T) {
 	policyPath := filepath.Join(t.TempDir(), "policy.json")
 	writePolicy(t, policyPath, nil, nil)

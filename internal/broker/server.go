@@ -712,11 +712,13 @@ func (s *Server) collect(ctx context.Context, req rpc.Request) rpc.Response {
 			continue
 		}
 		if !validChat(*row.Chat) {
-			return rpc.Failure(req.ID, "backend_invalid", "backend returned invalid conversation metadata", false)
+			// A malformed or no-longer-authorizable message cannot be exposed,
+			// but it must not permanently wedge the physical insertion cursor.
+			continue
 		}
 		message, include, exposeErr := s.exposeMessage(*row.Message, *row.Chat, p)
 		if exposeErr != nil {
-			return rpc.Failure(req.ID, "backend_invalid", "backend returned unsafe message metadata", false)
+			continue
 		}
 		if include {
 			messages = append(messages, message)
