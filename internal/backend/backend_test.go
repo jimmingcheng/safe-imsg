@@ -22,7 +22,7 @@ func makeProcess(t *testing.T, script string) (*Process, string) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "imsg-fake")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '0.13.1-safe-imsg.2\\n'; exit 0; fi\n"+script), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '0.13.1-safe-imsg.3\\n'; exit 0; fi\n"+script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	database := filepath.Join(dir, "chat.db")

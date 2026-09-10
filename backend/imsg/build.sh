@@ -17,5 +17,5 @@ install -m 0644 "$overlay_dir/SafeCollectionTests.swift" Tests/IMsgCoreTests/
 install -m 0644 "$overlay_dir/Package.resolved" Package.resolved
 "$SAFE_IMSG_SWIFT" test --force-resolved-versions --filter SafeCollection --jobs 2
 "$SAFE_IMSG_SWIFT" build --force-resolved-versions -c release --product imsg --jobs 2
-test "$(.build/release/imsg --version)" = 0.13.1-safe-imsg.2
+test "$(.build/release/imsg --version)" = 0.13.1-safe-imsg.3
 echo 'Build and synthetic collection tests passed. No production installation performed.'

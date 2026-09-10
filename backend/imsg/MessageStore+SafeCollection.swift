@@ -39,6 +39,11 @@ extension MessageStore {
       notBefore == nil || (afterRowID == 0 && throughRowID == nil)
     else { throw SafeCollectionError.invalidBounds }
     guard schema.hasReactionColumns else { throw SafeCollectionError.unsupportedSchema }
+    if notBefore != nil {
+      guard let accountID, !accountID.isEmpty, schema.hasChatAccountIDColumn else {
+        throw SafeCollectionError.unsupportedSchema
+      }
+    }
 
     return try withConnection { db in
       var page: SafeCollectionPage?
@@ -53,12 +58,34 @@ extension MessageStore {
         let upper = try throughRowID ?? max(afterRowID, int64Value(db.scalar("SELECT MAX(ROWID) FROM message")) ?? 0)
         var lower = afterRowID
         if let notBefore {
-          // Find the earliest insertion row whose message timestamp is in the
-          // requested horizon. Rows after it are still scanned physically and
-          // older interleaved rows are left for the consumer's durable cutoff.
+          // Anchor only on a row that could be collected for this account. A
+          // date-only anchor can be pulled arbitrarily far back by reactions,
+          // app payloads, other accounts, or corrupt future timestamps.
+          guard let accountID else { throw SafeCollectionError.unsupportedSchema }
           let threshold = MessageStore.appleEpoch(notBefore)
+          let latestPlausible = MessageStore.appleEpoch(Date().addingTimeInterval(5 * 60))
+          let balloon = schema.hasBalloonBundleIDColumn ? "m.balloon_bundle_id" : "NULL"
+          let body = schema.hasAttributedBody ? "m.attributedBody" : "NULL"
           if let first = int64Value(try db.scalar(
-            "SELECT MIN(ROWID) FROM message WHERE ROWID <= ? AND date >= ?", upper, threshold))
+            """
+            SELECT MIN(m.ROWID)
+            FROM message m
+            JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+            JOIN chat c ON c.ROWID = cmj.chat_id
+            WHERE m.ROWID <= ? AND m.date >= ? AND m.date <= ?
+              AND c.account_id = ?
+              AND COALESCE(m.associated_message_type, 0) = 0
+              AND (COALESCE(\(balloon), '') = '' OR
+                substr(\(balloon), -length('com.apple.messages.URLBalloonProvider')) =
+                  'com.apple.messages.URLBalloonProvider')
+              AND m.is_from_me IN (0, 1)
+              AND typeof(m.guid) = 'text'
+              AND length(CAST(m.guid AS BLOB)) BETWEEN 1 AND 512
+              AND COALESCE(length(CAST(m.text AS BLOB)), 0) <= 65536
+              AND COALESCE(length(\(body)), 0) <= 1048576
+              AND (SELECT COUNT(DISTINCT cmj2.chat_id) FROM chat_message_join cmj2
+                WHERE cmj2.message_id = m.ROWID) = 1
+            """, upper, threshold, latestPlausible, accountID))
           {
             lower = max(0, first - 1)
           } else {

@@ -140,4 +140,41 @@ import Testing
         accountID: "account", notBefore: cutoff)
     }
   }
+
+  @Test func timestampHorizonIgnoresRowsThatCannotBelongToCollection() throws {
+    let (store, db) = try fixture(7)
+    let cutoff = Date().addingTimeInterval(-60 * 60)
+    let recent = MessageStore.appleEpoch(Date().addingTimeInterval(-30 * 60))
+    try db.run("UPDATE message SET date = 0")
+    // A future timestamp, reaction, app payload, foreign-account message and
+    // orphan all precede the first plausible row for the configured account.
+    try db.run("UPDATE message SET date = ? WHERE ROWID = 1",
+      MessageStore.appleEpoch(Date().addingTimeInterval(60 * 60)))
+    try db.run("UPDATE message SET date = ?, associated_message_type = 2000 WHERE ROWID = 2", recent)
+    try db.run("UPDATE message SET date = ?, balloon_bundle_id = 'com.example.poll' WHERE ROWID = 3", recent)
+    try db.run("INSERT INTO chat VALUES (2, 'foreign', 'iMessage;-;foreign', 'FOREIGN', 'iMessage', 'other-account')")
+    try db.run("UPDATE chat_message_join SET chat_id = 2 WHERE message_id = 4")
+    try db.run("UPDATE message SET date = ? WHERE ROWID IN (4, 5, 6)", recent)
+    try db.run("DELETE FROM chat_message_join WHERE message_id = 5")
+    let page = try store.safeCollection(afterRowID: 0, throughRowID: nil, limit: 10,
+      accountID: "account", notBefore: cutoff)
+    #expect(page.rows.map(\.id) == [6, 7])
+    #expect(page.rows.compactMap(\.message).count == 2)
+    #expect(page.complete)
+  }
+
+  @Test func timestampHorizonRequiresProvableAccountOwnership() throws {
+    let (store, db) = try fixture(1)
+    let cutoff = Date().addingTimeInterval(-60)
+    #expect(throws: (any Error).self) {
+      try store.safeCollection(afterRowID: 0, throughRowID: nil, limit: 10,
+        accountID: nil, notBefore: cutoff)
+    }
+    let unsupported = try MessageStore(connection: db, path: ":memory:",
+      hasChatAccountIDColumn: false)
+    #expect(throws: (any Error).self) {
+      try unsupported.safeCollection(afterRowID: 0, throughRowID: nil, limit: 10,
+        accountID: "account", notBefore: cutoff)
+    }
+  }
 }

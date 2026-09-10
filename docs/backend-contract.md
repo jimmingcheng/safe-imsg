@@ -2,7 +2,7 @@
 
 The adapter is based on OpenClaw `imsg` tag `v0.13.1`, commit
 `6918867c6439298103df592d09835fdfda51a090`. Collection requires the reviewed
-[native overlay](../backend/imsg/README.md), version `0.13.1-safe-imsg.2`.
+[native overlay](../backend/imsg/README.md), version `0.13.1-safe-imsg.3`.
 The original version remains supported for other reads, not collection.
 
 It executes exactly these process shapes, with the executable and database
