@@ -1,0 +1,15 @@
+{
+  "messages": {
+    "owner_aliases": [
+      "+14155550000",
+      "owner@example.com"
+    ],
+    "allowed_direct": [
+      "+14155550100",
+      "friend@example.net"
+    ],
+    "excluded_conversations": [
+      "iMessage;+;explicitly-excluded-group-guid"
+    ]
+  }
+}

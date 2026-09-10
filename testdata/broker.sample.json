@@ -1,0 +1,18 @@
+{
+  "instance": "personal",
+  "account_id": "apple-personal",
+  "client_uid": 502,
+  "socket_path": "/Users/Shared/safe-imsg/personal.sock",
+  "socket_mode": "0660",
+  "backend_path": "/opt/safe-imsg/imsg-v0.13.1",
+  "backend_version": "0.13.1",
+  "database_path": "/Users/messages-owner/Library/Messages/chat.db",
+  "backend_account_id": "iMessage:owner@example.com",
+  "database_generation": "messages-install-2026-01",
+  "policy_path": "/Users/messages-owner/.config/safe-imsg/policy.json",
+  "max_results": 100,
+  "max_chat_scan": 500,
+  "max_message_scan": 1000,
+  "max_collection_scan": 500,
+  "backend_timeout_ms": 10000
+}

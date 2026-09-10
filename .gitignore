@@ -1,0 +1,4 @@
+/bin/
+*.sock
+*.lock
+coverage.out
