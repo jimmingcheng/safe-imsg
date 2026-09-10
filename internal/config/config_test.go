@@ -27,6 +27,7 @@ func TestValidateRejectsUnsafeConfig(t *testing.T) {
 		edit func(*Config)
 	}{
 		{"relative database", func(c *Config) { c.DatabasePath = "chat.db" }},
+		{"ambiguous parent path", func(c *Config) { c.PolicyPath = "/trusted/link/../policy.json" }},
 		{"same uid", func(c *Config) { c.ClientUID = uint32(os.Geteuid()) }},
 		{"world socket", func(c *Config) { c.SocketMode = "0666" }},
 		{"unbounded results", func(c *Config) { c.MaxResults = 501 }},
@@ -45,6 +46,9 @@ func TestValidateRejectsUnsafeConfig(t *testing.T) {
 
 func TestLoadRejectsUnknownAndWritableFile(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(path, []byte(`{"unknown":true}`), 0o600); err != nil {
 		t.Fatal(err)

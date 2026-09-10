@@ -1,7 +1,6 @@
 package backend
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -10,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -25,8 +23,9 @@ const (
 )
 
 var (
-	ErrFailed   = errors.New("imsg backend failed")
-	ErrOverflow = errors.New("incremental scan overflow")
+	ErrFailed     = errors.New("imsg backend failed")
+	ErrOverflow   = errors.New("incremental scan overflow")
+	ErrIncomplete = errors.New("incremental scan made no observable progress")
 )
 
 type RawChat struct {
@@ -44,7 +43,7 @@ type RawMessage struct {
 	ChatID         int64     `json:"chat_id"`
 	GUID           string    `json:"guid"`
 	Sender         string    `json:"sender"`
-	IsFromMe       bool      `json:"is_from_me"`
+	IsFromMe       *bool     `json:"is_from_me"`
 	Text           string    `json:"text"`
 	CreatedAt      string    `json:"created_at"`
 	ChatIdentifier string    `json:"chat_identifier"`
@@ -98,9 +97,7 @@ func New(cfg config.Config) (*Process, error) {
 func checkVersion(path, expected string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, path, "--version")
-	cmd.Dir = "/"
-	cmd.Stderr = io.Discard
+	cmd := backendCommand(ctx, path, "--version")
 	output := cappedBuffer{max: 256}
 	cmd.Stdout = &output
 	if err := cmd.Run(); err != nil || ctx.Err() != nil || strings.TrimSpace(output.String()) != expected {
@@ -110,20 +107,28 @@ func checkVersion(path, expected string) error {
 }
 
 type cappedBuffer struct {
-	bytes.Buffer
-	max int
+	buffer bytes.Buffer
+	max    int
 }
 
+func (b *cappedBuffer) String() string { return b.buffer.String() }
+
 func (b *cappedBuffer) Write(value []byte) (int, error) {
-	if len(value) > b.max-b.Len() {
+	if len(value) > b.max-b.buffer.Len() {
 		return 0, fmt.Errorf("output limit exceeded")
 	}
-	return b.Buffer.Write(value)
+	return b.buffer.Write(value)
 }
 
 func (p *Process) Generation() string { return p.generation }
 
 func (p *Process) checkIdentity() error {
+	if err := securefile.CheckOwnerFile(p.database, false); err != nil {
+		return ErrFailed
+	}
+	if err := securefile.CheckOwnerFile(p.path, true); err != nil {
+		return ErrFailed
+	}
 	current, err := databaseIdentity(p.database)
 	if err != nil || current != p.identity {
 		return fmt.Errorf("database identity changed: %w", ErrFailed)
@@ -193,55 +198,37 @@ func (p *Process) run(ctx context.Context, args []string, maxRows int, handle fu
 	}
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, p.path, args...)
-	cmd.Dir = "/"
-	cmd.Stderr = io.Discard
-	stdout, err := cmd.StdoutPipe()
+	stream, err := startStream(ctx, p.path, args)
 	if err != nil {
-		return ErrFailed
-	}
-	if err := cmd.Start(); err != nil {
-		return ErrFailed
-	}
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 64*1024), maxBackendLineBytes)
-	count := 0
-	totalBytes := 0
-	for scanner.Scan() {
-		if strings.TrimSpace(scanner.Text()) == "" {
-			continue
-		}
-		count++
-		totalBytes += len(scanner.Bytes())
-		if count > maxRows || totalBytes > maxBackendOutputBytes {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-			return ErrFailed
-		}
-		if err := handle(bytes.Clone(scanner.Bytes())); err != nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-			return ErrFailed
-		}
-	}
-	scanErr := scanner.Err()
-	waitErr := cmd.Wait()
-	if scanErr != nil || waitErr != nil || ctx.Err() != nil {
-		return ErrFailed
-	}
-	if err := p.checkIdentity(); err != nil {
 		return err
 	}
-	return nil
+	defer stream.close()
+	count := 0
+	for {
+		select {
+		case event, ok := <-stream.events:
+			if !ok || ctx.Err() != nil {
+				return ErrFailed
+			}
+			if event.line == nil {
+				if event.readErr != nil || event.exitErr != nil {
+					return ErrFailed
+				}
+				return p.checkIdentity()
+			}
+			count++
+			if count > maxRows || handle(event.line) != nil {
+				return ErrFailed
+			}
+		case <-ctx.Done():
+			return ErrFailed
+		}
+	}
 }
 
-type collectEvent struct {
-	line []byte
-	done error
-}
-
-// Collect runs imsg's exclusive since-rowid watch just long enough to drain its
-// immediate backlog. The caller owns policy filtering and cursor advancement.
+// Collect returns an observed prefix, never a claim that watch has caught up.
+// A quiet window without any row cannot distinguish an empty database from
+// slow startup or upstream-only suppressed batches, so it is explicitly incomplete.
 func (p *Process) Collect(ctx context.Context, afterRowID int64, scanLimit int) ([]RawMessage, error) {
 	if afterRowID <= 0 || scanLimit <= 0 {
 		return nil, ErrFailed
@@ -251,118 +238,62 @@ func (p *Process) Collect(ctx context.Context, afterRowID int64, scanLimit int) 
 	}
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, p.path, "watch", "--db", p.database, "--since-rowid", strconv.FormatInt(afterRowID, 10), "--debounce", "0ms", "--json")
-	cmd.Dir = "/"
-	cmd.Stderr = io.Discard
-	stdout, err := cmd.StdoutPipe()
+	args := []string{"watch", "--db", p.database, "--since-rowid", strconv.FormatInt(afterRowID, 10), "--debounce", "0ms", "--json"}
+	stream, err := startStream(ctx, p.path, args)
 	if err != nil {
-		return nil, ErrFailed
+		return nil, err
 	}
-	if err := cmd.Start(); err != nil {
-		return nil, ErrFailed
-	}
-	events := make(chan collectEvent, 1)
-	stopEvents := make(chan struct{})
-	defer close(stopEvents)
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 64*1024), maxBackendLineBytes)
-		for scanner.Scan() {
-			line := bytes.Clone(scanner.Bytes())
-			if len(bytes.TrimSpace(line)) > 0 {
-				select {
-				case events <- collectEvent{line: line}:
-				case <-stopEvents:
-					return
-				}
-			}
-		}
-		scanErr := scanner.Err()
-		waitErr := cmd.Wait()
-		if scanErr != nil {
-			select {
-			case events <- collectEvent{done: scanErr}:
-			case <-stopEvents:
-			}
-		} else {
-			select {
-			case events <- collectEvent{done: waitErr}:
-			case <-stopEvents:
-			}
-		}
-	}()
+	defer stream.close()
 
 	timer := time.NewTimer(1500 * time.Millisecond)
 	defer timer.Stop()
 	rows := make([]RawMessage, 0)
-	totalBytes := 0
+	stopping := false
 	for {
 		select {
-		case event := <-events:
-			if event.line != nil {
-				totalBytes += len(event.line)
-				if totalBytes > maxBackendOutputBytes {
-					_ = cmd.Process.Kill()
-					return nil, ErrOverflow
-				}
-				var row RawMessage
-				if err := decodeLine(event.line, &row); err != nil {
-					_ = cmd.Process.Kill()
-					return nil, ErrFailed
-				}
-				rows = append(rows, row)
-				if len(rows) > scanLimit {
-					_ = cmd.Process.Kill()
-					return nil, ErrOverflow
-				}
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				timer.Reset(500 * time.Millisecond)
-				continue
-			}
-			if event.done != nil {
+		case event, ok := <-stream.events:
+			if !ok || ctx.Err() != nil {
 				return nil, ErrFailed
 			}
-			if err := p.checkIdentity(); err != nil {
-				return nil, err
-			}
-			return rows, nil
-		case <-timer.C:
-			_ = cmd.Process.Kill()
-			drainDeadline := time.After(time.Second)
-			for {
-				select {
-				case event := <-events:
-					if event.line == nil {
-						goto drained
-					}
-					totalBytes += len(event.line)
-					if totalBytes > maxBackendOutputBytes {
-						return nil, ErrOverflow
-					}
-					var row RawMessage
-					if err := decodeLine(event.line, &row); err != nil {
-						return nil, ErrFailed
-					}
-					rows = append(rows, row)
-					if len(rows) > scanLimit {
-						return nil, ErrOverflow
-					}
-				case <-drainDeadline:
+			if event.line == nil {
+				if errors.Is(event.readErr, ErrOverflow) {
+					return nil, ErrOverflow
+				}
+				// Only our deliberate stop is successful. Scanner failures,
+				// ordinary nonzero exits, and unexpected clean exits fail closed.
+				if event.readErr != nil || !stopping || !killedProcess(event.exitErr) {
 					return nil, ErrFailed
 				}
+				if err := p.checkIdentity(); err != nil {
+					return nil, err
+				}
+				if len(rows) == 0 {
+					return nil, ErrIncomplete
+				}
+				return rows, nil
 			}
-		drained:
-			if err := p.checkIdentity(); err != nil {
-				return nil, err
+			var row RawMessage
+			if err := decodeLine(event.line, &row); err != nil {
+				return nil, ErrFailed
 			}
-			return rows, nil
+			rows = append(rows, row)
+			if len(rows) > scanLimit {
+				return nil, ErrOverflow
+			}
+			if !stopping {
+				timer.Reset(500 * time.Millisecond)
+			}
+		case <-timer.C:
+			if stopping {
+				return nil, ErrFailed
+			}
+			stopping = true
+			if err := stream.cmd.Cancel(); err != nil {
+				return nil, ErrFailed
+			}
+			// Drain all buffered output and observe Wait before returning.
+			timer.Reset(time.Second)
 		case <-ctx.Done():
-			_ = cmd.Process.Kill()
 			return nil, ErrFailed
 		}
 	}

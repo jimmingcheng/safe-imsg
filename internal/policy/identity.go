@@ -33,7 +33,7 @@ func NormalizeIdentity(raw string) (string, error) {
 		}
 	}
 	normalized := b.String()
-	if !strings.HasPrefix(normalized, "+") || len(normalized) < 9 || len(normalized) > 16 {
+	if !strings.HasPrefix(normalized, "+") || len(normalized) < 9 || len(normalized) > 16 || normalized[1] == '0' {
 		return "", fmt.Errorf("phone identity %q must normalize to E.164", raw)
 	}
 	return normalized, nil

@@ -8,6 +8,11 @@ func TestSuppress(t *testing.T) {
 		want bool
 	}{
 		{"Your verification code is 123456", true},
+		{"123456 is your Apple ID code.", true},
+		{"Your verification code is ABCD-EFGH", true},
+		{"One-time\npassword: ABCDEF", true},
+		{"https://example.com/lo%67in?to%6ben=secret", true},
+		{"https://example.com/#/login?token=secret", true},
 		{"OTP: 91 22 30. Do not share it.", true},
 		{"Use this magic link: https://example.com/magic?t=secret", true},
 		{"Sign in at https://example.com/session/abc", true},

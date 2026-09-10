@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/jimmingcheng/safe-imsg/internal/securefile"
@@ -26,10 +25,7 @@ type Policy struct {
 }
 
 func Load(path string) (*Policy, error) {
-	if err := securefile.CheckOwnerFile(path, false); err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(path)
+	data, err := securefile.ReadOwnerFile(path, 1<<20)
 	if err != nil {
 		return nil, fmt.Errorf("read policy: %w", err)
 	}
@@ -91,8 +87,24 @@ func (p *Policy) Authorize(c Conversation) Decision {
 	if p == nil || c.IsGroup == nil || c.Participants == nil || strings.TrimSpace(c.GUID) == "" {
 		return Decision{}
 	}
-	marker := strings.Contains(c.GUID, ";+;") || strings.Contains(c.Identifier, ";+;")
+	parts := strings.Split(c.GUID, ";")
+	if len(parts) != 3 || parts[0] == "" || parts[2] == "" || (parts[1] != "+" && parts[1] != "-") || c.Identifier == "" {
+		return Decision{}
+	}
+	marker := parts[1] == "+"
 	if *c.IsGroup != marker {
+		return Decision{}
+	}
+	// A structured identifier must agree with the GUID. The plain identifier
+	// used by native Messages rows must identify the same conversation.
+	identifier := c.Identifier
+	if strings.Contains(identifier, ";") {
+		if identifier != c.GUID {
+			return Decision{}
+		}
+		identifier = parts[2]
+	}
+	if marker && identifier != parts[2] {
 		return Decision{}
 	}
 	participants := make([]string, 0, len(*c.Participants))
@@ -118,8 +130,12 @@ func (p *Policy) Authorize(c Conversation) Decision {
 	if len(participants) != 1 {
 		return Decision{}
 	}
-	identifier, err := NormalizeIdentity(c.Identifier)
+	identifier, err := NormalizeIdentity(identifier)
 	if err != nil || identifier != participants[0] {
+		return Decision{}
+	}
+	guidIdentity, err := NormalizeIdentity(parts[2])
+	if err != nil || guidIdentity != identifier {
 		return Decision{}
 	}
 	if _, own := p.owners[identifier]; own {

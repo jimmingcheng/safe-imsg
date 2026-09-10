@@ -32,8 +32,14 @@ func ValidateRequest(req Request) error {
 }
 
 func DecodeParams(raw json.RawMessage, dst any) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return fmt.Errorf("expected a JSON object")
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
+	// Response.Result is an interface; float64 would silently round int64 IDs.
+	dec.UseNumber()
 	if err := dec.Decode(dst); err != nil {
 		return err
 	}

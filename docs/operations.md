@@ -18,15 +18,21 @@ sudo install -d -o messages-owner -g safe-imsg -m 0750 /Users/Shared/safe-imsg
 
 Install both Go binaries somewhere root-owned. Install the audited `imsg`
 binary at a stable, non-symlink path. The owner should keep broker configuration
-and policy mode `0600` in an owner-only directory. `chat.db` is opened only by
-the configured `imsg` child; safe-imsg does not query SQLite directly.
+and policy mode `0600` in an owner-only directory. `chat.db` is opened by
+the configured `imsg` child for content; safe-imsg validates file permissions
+and identity without querying SQLite. Paths must be absolute and clean (no `..`
+components). All parent directories must be owned by
+the broker user or root and protected from group/other writes. Root-owned
+sticky directories are allowed as ancestors. Trusted ancestor symlinks such as
+macOS `/var` are checked along with their resolved targets.
 
 Set the socket mode to `0660` when the owner and client share the socket group.
 The immediate socket directory must be owner-owned and not writable by group or
 other. `safe-imsgd` refuses to replace symlinks, regular files, or active Unix
 sockets. It removes only a connection-refused stale socket while holding an
 owner-only adjacent lock, and removes its own socket at shutdown only if the
-file identity still matches.
+file identity still matches. Existing lock files must have one link and private
+permissions; lock validation never changes an existing file's permissions.
 
 ## Validation and startup
 
@@ -52,6 +58,12 @@ raw backend failures. Supervise process health and `system.ping`; treat a
 `backend_unavailable`, `backend_invalid`, database identity change, or
 `collection_overflow` as an operator event. Resolve the cause rather than
 raising scan bounds without reviewing resource impact.
+
+`collection_incomplete` is retryable and leaves the cursor unchanged. It means
+watch produced no observable rows before its window ended, which can reflect a
+quiet database, slow startup, or a batch suppressed internally by upstream.
+Repeated lack of progress requires owner investigation; never advance a cursor
+manually to bypass an unresolved batch if complete collection is required.
 
 No live message read, export, send, OpenClaw modification, SSH change, or Donna
 bridge change is part of repository installation or testing.

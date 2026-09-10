@@ -29,6 +29,8 @@ The adapter relies on these audited facts:
 - watch `--since-rowid` is exclusive; the value zero means “start at newest,”
   so safe-imsg requires a positive value;
 - watch reads physical rows in ascending row-ID order in batches of 100;
+- its fallback poll interval is five seconds and it publishes no high-water
+  mark for a batch that produces no messages;
 - upstream message JSON may expand reply bodies and may contain attachments,
   reactions, previews, polls, display names, and routing data.
 
@@ -36,5 +38,13 @@ Only the narrow Go `RawChat` and `RawMessage` fields are decoded. The outbound
 types cannot contain reply expansion, attachments or paths/names, reactions,
 previews, polls, arbitrary rich payloads, display/contact names, unread counts,
 or backend errors.
+
+The broker collects a bounded observed prefix: it waits 1.5 seconds for an
+initial row, then ends the window after 500 ms without another row. It drains
+buffered output and waits for the process before returning. Only a deliberate
+broker stop is successful; an unexpected clean exit also fails. If no rows were
+observed it returns `collection_incomplete`. Thus the overflow bound applies to
+observed rows, not to an unknowable total database backlog. Consumers must not
+interpret any watch window as proof of a complete database replay.
 
 Re-audit these assumptions before changing the pinned backend version.

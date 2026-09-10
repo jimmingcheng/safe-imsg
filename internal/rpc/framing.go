@@ -31,11 +31,25 @@ func WriteFrame(w io.Writer, payload []byte) error {
 	}
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(payload)))
-	if _, err := w.Write(header[:]); err != nil {
+	if err := writeAll(w, header[:]); err != nil {
 		return fmt.Errorf("write frame header: %w", err)
 	}
-	if _, err := w.Write(payload); err != nil {
+	if err := writeAll(w, payload); err != nil {
 		return fmt.Errorf("write frame body: %w", err)
+	}
+	return nil
+}
+
+func writeAll(w io.Writer, payload []byte) error {
+	for len(payload) > 0 {
+		n, err := w.Write(payload)
+		if err != nil {
+			return err
+		}
+		if n <= 0 || n > len(payload) {
+			return io.ErrShortWrite
+		}
+		payload = payload[n:]
 	}
 	return nil
 }

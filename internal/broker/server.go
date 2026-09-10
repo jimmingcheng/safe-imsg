@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -21,6 +22,7 @@ import (
 	contentfilter "github.com/jimmingcheng/safe-imsg/internal/filter"
 	"github.com/jimmingcheng/safe-imsg/internal/policy"
 	"github.com/jimmingcheng/safe-imsg/internal/rpc"
+	"github.com/jimmingcheng/safe-imsg/internal/securefile"
 )
 
 const (
@@ -63,6 +65,8 @@ func NewWithDeps(cfg config.Config, deps Dependencies) (*Server, error) {
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	dir := filepath.Dir(s.cfg.SocketPath)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("create socket directory: %w", err)
@@ -78,17 +82,22 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := prepareSocketPath(s.cfg.SocketPath); err != nil {
 		return err
 	}
-	listener, err := net.Listen("unix", s.cfg.SocketPath)
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: s.cfg.SocketPath, Net: "unix"})
 	if err != nil {
 		return fmt.Errorf("listen on broker socket: %w", err)
 	}
+	// Go otherwise unlinks the path on Close before our identity check runs.
+	listener.SetUnlinkOnClose(false)
+	var handlers sync.WaitGroup
 	createdInfo, statErr := os.Lstat(s.cfg.SocketPath)
 	if statErr != nil {
 		listener.Close()
 		return fmt.Errorf("inspect broker socket: %w", statErr)
 	}
 	defer func() {
+		cancel()
 		_ = listener.Close()
+		handlers.Wait()
 		if current, err := os.Lstat(s.cfg.SocketPath); err == nil && os.SameFile(createdInfo, current) {
 			_ = os.Remove(s.cfg.SocketPath)
 		}
@@ -97,10 +106,10 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := os.Chmod(s.cfg.SocketPath, mode); err != nil {
 		return fmt.Errorf("set broker socket mode: %w", err)
 	}
-	go func() {
-		<-ctx.Done()
+	stopListening := context.AfterFunc(ctx, func() {
 		_ = listener.Close()
-	}()
+	})
+	defer stopListening()
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -111,9 +120,11 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		select {
 		case s.connections <- struct{}{}:
+			handlers.Add(1)
 			go func() {
+				defer handlers.Done()
 				defer func() { <-s.connections }()
-				s.handleConn(conn)
+				s.handleConn(ctx, conn)
 			}()
 		default:
 			_ = conn.Close()
@@ -122,6 +133,9 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func checkSocketDir(path string) error {
+	if err := securefile.CheckParents(path); err != nil {
+		return err
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("inspect socket directory: %w", err)
@@ -158,15 +172,21 @@ func prepareSocketPath(path string) error {
 	if !errors.Is(dialErr, syscall.ECONNREFUSED) && !errors.Is(dialErr, os.ErrNotExist) {
 		return fmt.Errorf("existing socket could be active; refusing to remove it")
 	}
+	current, err := os.Lstat(path)
+	if err != nil || !os.SameFile(info, current) {
+		return fmt.Errorf("socket path changed while probing it")
+	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove stale broker socket: %w", err)
 	}
 	return nil
 }
 
-func (s *Server) handleConn(conn net.Conn) {
+func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(time.Duration(s.cfg.BackendTimeoutMillis+10000) * time.Millisecond))
+	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopClose()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	unixConn, ok := conn.(*net.UnixConn)
 	if !ok {
 		_ = writeResponse(conn, rpc.Failure("", "internal_error", "invalid transport", false))
@@ -206,7 +226,8 @@ func (s *Server) handleConn(conn net.Conn) {
 		_ = writeResponse(conn, rpc.Failure(req.ID, code, err.Error(), false))
 		return
 	}
-	_ = writeResponse(conn, s.dispatch(context.Background(), req))
+	_ = conn.SetWriteDeadline(time.Now().Add(time.Duration(s.cfg.BackendTimeoutMillis)*time.Millisecond + time.Second))
+	_ = writeResponse(conn, s.dispatch(ctx, req))
 }
 
 func writeResponse(conn net.Conn, resp rpc.Response) error {
@@ -220,7 +241,15 @@ func writeResponse(conn net.Conn, resp rpc.Response) error {
 	return rpc.WriteFrame(conn, payload)
 }
 
-func (s *Server) dispatch(ctx context.Context, req rpc.Request) rpc.Response {
+func (s *Server) dispatch(ctx context.Context, req rpc.Request) (resp rpc.Response) {
+	// A single deadline covers watch/history and all subsequent chat lookups.
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(s.cfg.BackendTimeoutMillis)*time.Millisecond)
+	defer cancel()
+	defer func() {
+		if ctx.Err() != nil {
+			resp = backendFailure(req.ID, ctx.Err())
+		}
+	}()
 	switch req.Method {
 	case rpc.MethodSystemPing:
 		if err := decodeEmpty(req.Params); err != nil {
@@ -260,7 +289,7 @@ func invalidParams(id string, err error) rpc.Response {
 
 func normalizeLimit(requested, defaultValue, maximum int) (int, error) {
 	if requested == 0 {
-		return defaultValue, nil
+		return min(defaultValue, maximum), nil
 	}
 	if requested < 1 || requested > maximum {
 		return 0, fmt.Errorf("limit must be between 1 and %d", maximum)
@@ -325,6 +354,7 @@ func (s *Server) listChats(ctx context.Context, req rpc.Request) rpc.Response {
 		return *failure
 	}
 	result := make([]rpc.Chat, 0, limit)
+	complete := len(rows) < s.cfg.MaxChatScan
 	for _, row := range rows {
 		if !validChat(row) {
 			return rpc.Failure(req.ID, "backend_invalid", "backend returned invalid conversation metadata", false)
@@ -333,11 +363,15 @@ func (s *Server) listChats(ctx context.Context, req rpc.Request) rpc.Response {
 			continue
 		}
 		decision := p.Authorize(toConversation(row))
-		if decision.Allowed && len(result) < limit {
-			result = append(result, s.exposeChat(row, decision))
+		if decision.Allowed {
+			if len(result) == limit {
+				complete = false
+			} else {
+				result = append(result, s.exposeChat(row, decision))
+			}
 		}
 	}
-	return rpc.Success(req.ID, rpc.ListChatsResult{Chats: result, ScanComplete: len(rows) < s.cfg.MaxChatScan})
+	return rpc.Success(req.ID, rpc.ListChatsResult{Chats: result, ScanComplete: complete})
 }
 
 func (s *Server) authorizedChat(ctx context.Context, id string, chatID int64, p *policy.Policy) (backend.RawChat, policy.Decision, *rpc.Response) {
@@ -386,7 +420,7 @@ func sameConversation(message backend.RawMessage, chat backend.RawChat, p *polic
 }
 
 func (s *Server) exposeMessage(raw backend.RawMessage, chat backend.RawChat, p *policy.Policy) (rpc.Message, bool, error) {
-	if raw.ID <= 0 || raw.ChatID <= 0 || raw.GUID == "" || len(raw.GUID) > 512 || raw.ID < 0 ||
+	if raw.ID <= 0 || raw.ChatID <= 0 || raw.GUID == "" || len(raw.GUID) > 512 || raw.IsFromMe == nil ||
 		!utf8.ValidString(raw.Text) || len(raw.Text) > maxTextBytes {
 		return rpc.Message{}, false, fmt.Errorf("invalid message fields")
 	}
@@ -407,7 +441,7 @@ func (s *Server) exposeMessage(raw backend.RawMessage, chat backend.RawChat, p *
 		return rpc.Message{}, false, nil
 	}
 	sender := ""
-	if !raw.IsFromMe {
+	if !*raw.IsFromMe {
 		normalized, err := policy.NormalizeIdentity(raw.Sender)
 		if err != nil {
 			return rpc.Message{}, false, fmt.Errorf("invalid message sender")
@@ -425,7 +459,7 @@ func (s *Server) exposeMessage(raw backend.RawMessage, chat backend.RawChat, p *
 		sender = normalized
 	}
 	return rpc.Message{AccountID: s.cfg.AccountID, DatabaseGeneration: s.deps.Backend.Generation(), RowID: raw.ID,
-		ChatID: raw.ChatID, ChatGUID: raw.ChatGUID, GUID: raw.GUID, Sender: sender, FromMe: raw.IsFromMe,
+		ChatID: raw.ChatID, ChatGUID: raw.ChatGUID, GUID: raw.GUID, Sender: sender, FromMe: *raw.IsFromMe,
 		Text: raw.Text, CreatedAt: raw.CreatedAt}, true, nil
 }
 
@@ -463,16 +497,21 @@ func (s *Server) history(ctx context.Context, req rpc.Request) rpc.Response {
 		return rpc.Failure(req.ID, "not_visible", "conversation is not visible", false)
 	}
 	messages := make([]rpc.Message, 0, limit)
+	complete := len(rows) < s.cfg.MaxMessageScan
 	for _, row := range rows {
 		message, include, err := s.exposeMessage(row, chat, p)
 		if err != nil {
 			return rpc.Failure(req.ID, "backend_invalid", "backend returned unsafe message metadata", false)
 		}
-		if include && len(messages) < limit {
-			messages = append(messages, message)
+		if include {
+			if len(messages) == limit {
+				complete = false
+			} else {
+				messages = append(messages, message)
+			}
 		}
 	}
-	return rpc.Success(req.ID, rpc.HistoryResult{Messages: messages, ScanComplete: len(rows) < s.cfg.MaxMessageScan})
+	return rpc.Success(req.ID, rpc.HistoryResult{Messages: messages, ScanComplete: complete})
 }
 
 func (s *Server) getMessage(ctx context.Context, req rpc.Request) rpc.Response {
@@ -548,6 +587,9 @@ func decodeCursor(value string) (cursor, error) {
 	dec := json.NewDecoder(strings.NewReader(string(payload)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&c); err != nil || c.V != 1 || c.RowID <= 0 {
+		return cursor{}, fmt.Errorf("invalid cursor")
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		return cursor{}, fmt.Errorf("invalid cursor")
 	}
 	return c, nil
@@ -634,6 +676,9 @@ func (s *Server) collect(ctx context.Context, req rpc.Request) rpc.Response {
 }
 
 func backendFailure(id string, err error) rpc.Response {
+	if errors.Is(err, backend.ErrIncomplete) {
+		return rpc.Failure(id, "collection_incomplete", "watch produced no rows; retry from the unchanged cursor", true)
+	}
 	if errors.Is(err, backend.ErrOverflow) {
 		return rpc.Failure(id, "collection_overflow", "incremental backlog exceeds the configured safe scan bound", false)
 	}

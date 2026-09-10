@@ -3,6 +3,7 @@
 package broker
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -10,32 +11,39 @@ import (
 )
 
 func acquireLock(path string) (*os.File, error) {
-	if info, err := os.Lstat(path); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
-			return nil, fmt.Errorf("unsafe broker lock file")
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("inspect broker lock: %w", err)
+	flags := unix.O_RDWR | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_CLOEXEC
+	fd, err := unix.Open(path, flags|unix.O_CREAT|unix.O_EXCL, 0o600)
+	created := err == nil
+	if errors.Is(err, unix.EEXIST) {
+		fd, err = unix.Open(path, flags, 0)
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open broker lock: %w", err)
 	}
-	if err := file.Chmod(0o600); err != nil {
+	file := os.NewFile(uintptr(fd), path)
+	fail := func() (*os.File, error) {
 		file.Close()
-		return nil, fmt.Errorf("secure broker lock: %w", err)
+		return nil, fmt.Errorf("unsafe broker lock file")
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG ||
+		stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 || stat.Mode&0o077 != 0 {
+		return fail()
+	}
+	if created {
+		if err := file.Chmod(0o600); err != nil {
+			return fail()
+		}
 	}
 	opened, err := file.Stat()
 	if err != nil {
-		file.Close()
-		return nil, fmt.Errorf("inspect open broker lock: %w", err)
+		return fail()
 	}
 	pathInfo, err := os.Lstat(path)
 	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, pathInfo) {
-		file.Close()
-		return nil, fmt.Errorf("broker lock path changed while opening")
+		return fail()
 	}
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		file.Close()
 		return nil, fmt.Errorf("another broker owns the socket lock")
 	}

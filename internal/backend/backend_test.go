@@ -1,8 +1,10 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,6 +18,9 @@ import (
 func makeProcess(t *testing.T, script string) (*Process, string) {
 	t.Helper()
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(dir, "imsg-fake")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '0.13.1\\n'; exit 0; fi\n"+script), 0o700); err != nil {
 		t.Fatal(err)
@@ -29,6 +34,65 @@ func makeProcess(t *testing.T, script string) (*Process, string) {
 		t.Fatal(err)
 	}
 	return p, database
+}
+
+func TestWatchFailureAndNoProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name, script string
+		want         error
+	}{
+		{"clean exit", `printf '%s\n' '{"id":11}'; exit 0`, ErrFailed},
+		{"failure after row", `printf '%s\n' '{"id":11}'; exit 1`, ErrFailed},
+		{"quiet watch", `exec sleep 30`, ErrIncomplete},
+		{"oversized line", `head -c 2097153 /dev/zero | tr '\000' x; exec sleep 30`, ErrFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, _ := makeProcess(t, tc.script)
+			start := time.Now()
+			rows, err := p.Collect(context.Background(), 10, 10)
+			if !errors.Is(err, tc.want) || rows != nil {
+				t.Fatalf("rows=%v error=%v, want %v", rows, err, tc.want)
+			}
+			if time.Since(start) > 2*time.Second {
+				t.Fatal("watch failure did not terminate promptly")
+			}
+		})
+	}
+}
+
+func TestStreamCloseJoinsAndReapsProcess(t *testing.T) {
+	p, _ := makeProcess(t, `printf '%s\n' '{"id":11}' '{"id":12}'; sleep 30`)
+	s, err := startStream(context.Background(), p.path, []string{"watch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The reader is blocked delivering the second row when close is called.
+	<-s.events
+	s.close()
+	if s.cmd.ProcessState == nil {
+		t.Fatal("stream returned before reaping its child")
+	}
+}
+
+func TestBackendCancellationClosesInheritedPipes(t *testing.T) {
+	p, _ := makeProcess(t, `sleep 30 & exit 0`)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := p.ListChats(ctx, 1); !errors.Is(err, ErrFailed) {
+		t.Fatalf("error=%v", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("inherited stdout kept the request alive")
+	}
+}
+
+func TestVersionBufferCannotBypassLimitThroughReadFrom(t *testing.T) {
+	output := cappedBuffer{max: 16}
+	_, err := io.Copy(&output, io.LimitReader(bytes.NewBufferString(strings.Repeat("x", 256)), 256))
+	if err == nil || len(output.String()) > 16 {
+		t.Fatal("version output exceeded bound")
+	}
 }
 
 func TestBackendArgumentConstructionAndNarrowDecode(t *testing.T) {

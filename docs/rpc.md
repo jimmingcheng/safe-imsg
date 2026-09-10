@@ -33,7 +33,8 @@ generation, maximum result count, protocol version, and this exact method list.
 
 `imsg.history` requires `chat_id` and `database_generation`; `limit` is
 optional. It returns newest-first admitted messages and `scan_complete` for the
-underlying bounded scan.
+bounded scan and result limit: false means additional admitted messages may
+exist. An omitted limit is capped by the configured `max_results`.
 
 `imsg.get_message` requires `chat_id`, `database_generation`, and exact message
 `guid`. Lookup is limited to `max_message_scan` recent rows.
@@ -51,8 +52,10 @@ or:
 ```
 
 It returns ascending messages, a replacement cursor, and `more`. A true value
-requests an immediate follow-up probe; consumers still poll later after an
-empty response because upstream exposes no definitive caught-up marker. Never combine
+requests an immediate follow-up probe. No observable rows in the watch window
+produces retryable `collection_incomplete`, with no cursor advancement. Keep the
+previous cursor and retry later. This may also indicate upstream-suppressed
+batches; v1 cannot guarantee a full replay through such a batch. Never combine
 the two cursor forms. Cursors are account- and database-generation-bound, but
 are not authentication tokens; Unix peer credentials provide authentication.
 
@@ -72,5 +75,10 @@ Stable error codes include `invalid_request`, `invalid_params`,
 `unsupported_version`, `unauthorized_peer`, `peer_auth_failed`,
 `method_not_allowed`, `policy_unavailable`, `not_visible`, `not_found`,
 `lookup_incomplete`, `stale_generation`, `stale_cursor`,
-`collection_overflow`, `backend_invalid`, `backend_unavailable`, and
+`collection_overflow`, `collection_incomplete`, `backend_invalid`, `backend_unavailable`, and
 `response_too_large`.
+
+The configured `backend_timeout_ms` bounds the entire data request, including
+all per-chat backend lookups. Shutdown cancels requests and joins backend
+processes. The client preserves integer IDs exactly and cancels socket I/O when
+its context is canceled.

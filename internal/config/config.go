@@ -43,10 +43,7 @@ type Config struct {
 }
 
 func Load(path string) (Config, error) {
-	if err := securefile.CheckOwnerFile(path, false); err != nil {
-		return Config{}, err
-	}
-	data, err := os.ReadFile(path)
+	data, err := securefile.ReadOwnerFile(path, 1<<20)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
 	}
@@ -107,8 +104,8 @@ func (c Config) Validate() error {
 		"socket_path": c.SocketPath, "backend_path": c.BackendPath,
 		"database_path": c.DatabasePath, "policy_path": c.PolicyPath,
 	} {
-		if !filepath.IsAbs(value) || filepath.Clean(value) == string(filepath.Separator) {
-			return fmt.Errorf("config: %s must be an absolute non-root path", field)
+		if !filepath.IsAbs(value) || filepath.Clean(value) == string(filepath.Separator) || filepath.Clean(value) != value {
+			return fmt.Errorf("config: %s must be a clean absolute non-root path", field)
 		}
 	}
 	if c.ClientUID == 0 {

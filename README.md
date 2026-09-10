@@ -49,7 +49,10 @@ Copy [broker.sample.json](testdata/broker.sample.json) and
 [policy.sample.json](testdata/policy.sample.json) into an owner-only directory.
 All configured paths must be absolute. Files and the resolved `imsg` binary
 must be owned by the broker user or root and must not be group/other-writable.
-Symlinks are rejected, so configure the resolved path to a pinned `imsg`
+Parent directories must also protect these paths from client replacement;
+root-owned sticky directories such as `/tmp` are allowed as ancestors. Config
+and policy reads are bounded to 1 MiB and validate the opened file descriptor.
+File symlinks are rejected, so configure the resolved path to a pinned `imsg`
 executable rather than a Homebrew convenience symlink. Startup also executes
 `--version` and requires the configured, audited `0.13.1` version exactly.
 
@@ -109,10 +112,11 @@ safe-imsg --socket /Users/Shared/safe-imsg/personal.sock collect \
 ```
 
 Persist the returned cursor only after processing the response. `more: true`
-means call again immediately; poll again later even after an empty response.
-Because upstream exposes no definitive caught-up marker, every non-empty raw
-batch gets one conservative follow-up probe. A stale account/database cursor and a scan that
-exceeds the configured backlog bound are explicit errors.
+means call again immediately. When watch produces no observable rows, the broker
+returns retryable `collection_incomplete`; keep the previous cursor and retry
+later. An empty admitted message list can still advance the cursor past locally
+denied rows. A stale account/database cursor and an observed scan that exceeds
+the configured bound are explicit errors.
 
 ## Deliberate v1 limitations
 
@@ -120,13 +124,18 @@ exceeds the configured backlog bound are explicit errors.
   configured recent-history bound and returns `lookup_incomplete` instead of a
   false `not_found` when that bound is exhausted.
 - `imsg chats` has no paging cursor. `scan_complete: false` says older visible
-  chats may exist beyond the configured scan.
+  chats may exist beyond the configured scan or requested result limit. History
+  also sets `scan_complete: false` if the result limit omits admitted messages.
 - There is no safe “start at current maximum row” backend primitive. Collection
   therefore requires a known positive starting row and never derives one by
   taking the maximum of newest-first history.
 - `imsg watch` does not expose its internal maximum scanned row. The broker
-  advances only across rows it actually observes. This can replay internally
-  suppressed upstream rows, but cannot silently skip an admitted row.
+  advances only across rows it actually observes. Upstream reads at most 100
+  physical rows per poll and can suppress an entire batch. Repeated collection
+  may then make no progress: v1 cannot promise a full database replay or total
+  backlog detection. `collection_incomplete` reports this uncertainty instead of
+  claiming that the stream is caught up. Watch process exits and malformed
+  output return errors, without advancing the cursor.
 - This repository does not deploy or modify OpenClaw, Donna's unified intake,
   SSH access, or Messages. The JSON client is suitable for a later native
   Codex app-server/OpenClaw ingestion wrapper, where admitted items must remain

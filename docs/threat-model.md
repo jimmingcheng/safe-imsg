@@ -27,10 +27,12 @@ forwarding or database selector.
 - policy reload and authorization immediately before each data response;
 - database-generation binding and live device/inode replacement detection;
 - bounded backend output, result scans, text size, timeouts, and collection;
+- one deadline for each request and cancellation/reaping of backend processes;
 - conservative local code/link suppression before serialization;
 - allowlisted outbound fields and sanitized errors with backend stderr dropped;
 - safe socket lock, stale-socket probe, symlink/non-socket refusal, and
   identity-checked cleanup;
+- validation of opened policy/config descriptors and trusted parent paths;
 - unsupported peer-credential platforms fail closed.
 
 ## Residual risks
@@ -41,6 +43,13 @@ can be admitted. Authorized messages and participants are visible to the
 client. Row IDs and ordering can reveal gaps or relative activity. Group access
 intentionally includes non-allowlisted participants once native group metadata
 is verified.
+
+Cursors in v1 are readable resume positions, including the last observed denied
+row; they are not encrypted. They can therefore reveal otherwise hidden
+activity. Hiding that metadata requires an opaque cursor format with durable
+owner-held key material. Device/inode binding detects file replacement but not
+an in-place database restore; the owner must rotate `database_generation` for
+such a reset.
 
 The trusted `imsg` process can read the full database and its upstream parser
 is in the trusted computing base. A compromised owner account, root, kernel,

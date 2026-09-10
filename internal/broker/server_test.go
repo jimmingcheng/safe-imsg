@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -70,17 +71,21 @@ func dm(id int64, identity string) backend.RawChat {
 }
 
 func group(id int64, guid string, participants ...string) backend.RawChat {
-	return backend.RawChat{ID: id, Identifier: "chat;+;" + guid, GUID: guid, Service: "iMessage", AccountID: stringp("imsg-account"), IsGroup: boolp(true), Participants: &participants}
+	return backend.RawChat{ID: id, Identifier: strings.Split(guid, ";")[2], GUID: guid, Service: "iMessage", AccountID: stringp("imsg-account"), IsGroup: boolp(true), Participants: &participants}
 }
 
 func message(id int64, chat backend.RawChat, sender, text string) backend.RawMessage {
 	return backend.RawMessage{ID: id, ChatID: chat.ID, GUID: "message-" + strconv.FormatInt(id, 10), Sender: sender, Text: text,
+		IsFromMe:  boolp(false),
 		CreatedAt: "2026-09-09T00:00:00Z", ChatIdentifier: chat.Identifier, ChatGUID: chat.GUID,
 		IsGroup: chat.IsGroup, Participants: chat.Participants}
 }
 
 func writePolicy(t *testing.T, path string, allowed []string, excluded []string) {
 	t.Helper()
+	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	payload := map[string]any{"messages": map[string]any{
 		"owner_aliases": []string{"owner@example.com"}, "allowed_direct": allowed,
 		"excluded_conversations": excluded,
@@ -196,6 +201,13 @@ func TestHistoryRejectsContradictoryMessageMetadata(t *testing.T) {
 	resp := testServer(t, fake, policyPath).dispatch(context.Background(), request(t, rpc.MethodHistory, rpc.GenerationParams{ChatID: 1, DatabaseGeneration: "gen"}))
 	if resp.OK || resp.Error.Code != "backend_invalid" {
 		t.Fatalf("response = %#v", resp)
+	}
+	bad.IsGroup = chat.IsGroup
+	bad.IsFromMe = nil
+	fake.history = []backend.RawMessage{bad}
+	resp = testServer(t, fake, policyPath).dispatch(context.Background(), request(t, rpc.MethodHistory, rpc.GenerationParams{ChatID: 1, DatabaseGeneration: "gen"}))
+	if resp.OK || resp.Error.Code != "backend_invalid" {
+		t.Fatalf("missing direction metadata was admitted: %#v", resp)
 	}
 }
 
@@ -490,5 +502,132 @@ func TestSocketPathLifecycle(t *testing.T) {
 	defer listener.Close()
 	if err := prepareSocketPath(active); err == nil {
 		t.Fatal("active socket would be replaced")
+	}
+}
+
+func TestShutdownKeepsReplacement(t *testing.T) {
+	policyPath := filepath.Join(t.TempDir(), "policy.json")
+	writePolicy(t, policyPath, nil, nil)
+	server := testServer(t, &fakeBackend{generation: "gen"}, policyPath)
+	cancel, done := runTestServer(t, server)
+	defer cancel()
+	if err := os.Rename(server.cfg.SocketPath, server.cfg.SocketPath+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(server.cfg.SocketPath, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(server.cfg.SocketPath); err != nil || string(data) != "replacement" {
+		t.Fatalf("shutdown removed replacement: %s, %v", data, err)
+	}
+}
+
+type waitingBackend struct {
+	backend.Service
+	started chan context.Context
+}
+
+func (b waitingBackend) History(ctx context.Context, _ int64, _ int) ([]backend.RawMessage, error) {
+	b.started <- ctx
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestShutdownCancelsRequest(t *testing.T) {
+	policyPath := filepath.Join(t.TempDir(), "policy.json")
+	writePolicy(t, policyPath, []string{"+14155550100"}, nil)
+	fake := &fakeBackend{generation: "gen", chats: []backend.RawChat{dm(1, "+14155550100")}}
+	server := testServer(t, fake, policyPath)
+	waiting := waitingBackend{Service: fake, started: make(chan context.Context, 1)}
+	server.deps.Backend = waiting
+	cancel, done := runTestServer(t, server)
+	defer cancel()
+	callDone := make(chan struct{})
+	req := request(t, rpc.MethodHistory, rpc.GenerationParams{ChatID: 1, DatabaseGeneration: "gen"})
+	go func() {
+		defer close(callDone)
+		_, _ = rpc.Call(context.Background(), server.cfg.SocketPath, req)
+	}()
+	select {
+	case ctx := <-waiting.started:
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("backend request has no overall deadline")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("backend request did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not cancel the backend")
+	}
+	<-callDone
+}
+
+func TestLimitsAndCompleteness(t *testing.T) {
+	policyPath := filepath.Join(t.TempDir(), "policy.json")
+	writePolicy(t, policyPath, []string{"+14155550100"}, nil)
+	chat := dm(1, "+14155550100")
+	fake := &fakeBackend{generation: "gen", chats: []backend.RawChat{chat, dm(2, "+14155550100")}, history: []backend.RawMessage{
+		message(12, chat, "+14155550100", "two"), message(11, chat, "+14155550100", "one"),
+	}}
+	server := testServer(t, fake, policyPath)
+	server.cfg.MaxResults = 1
+	for _, req := range []rpc.Request{
+		request(t, rpc.MethodHistory, rpc.GenerationParams{ChatID: 1, DatabaseGeneration: "gen"}),
+		request(t, rpc.MethodListChats, rpc.ListChatsParams{}),
+	} {
+		resp := server.dispatch(context.Background(), req)
+		if !resp.OK {
+			t.Fatalf("response=%+v", resp)
+		}
+		switch r := resp.Result.(type) {
+		case rpc.HistoryResult:
+			if len(r.Messages) != 1 || r.ScanComplete {
+				t.Fatalf("history=%+v", r)
+			}
+		case rpc.ListChatsResult:
+			if len(r.Chats) != 1 || r.ScanComplete {
+				t.Fatalf("chats=%+v", r)
+			}
+		}
+	}
+}
+
+func TestCursorRejectsTrailingData(t *testing.T) {
+	raw := `{"v":1,"account_id":"acct","generation":"gen","row_id":1} {}`
+	if _, err := decodeCursor(base64.RawURLEncoding.EncodeToString([]byte(raw))); err == nil {
+		t.Fatal("cursor with a second object was accepted")
+	}
+}
+
+func TestRealPeerCredentials(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s")
+	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	client, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	conn, err := l.AcceptUnix()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	uid, err := peerUID(conn)
+	if err != nil || uid != uint32(os.Geteuid()) {
+		t.Fatalf("uid=%d err=%v", uid, err)
 	}
 }
